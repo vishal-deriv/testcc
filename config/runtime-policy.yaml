@@ -1,0 +1,22 @@
+---
+version: "1.0"
+description: "Runtime policy overrides - can be injected dynamically via API or edited on disk"
+
+rules: []
+# Example runtime rules (uncomment to activate):
+#
+# - id: "RUNTIME-001"
+#   name: "Block specific IP"
+#   severity: high
+#   pattern: '(curl|wget|nc|ssh)\s+.*10\.0\.0\.99'
+#   action: block
+#   message: "Blocked: Connection to suspicious internal IP"
+#   tags: ["runtime", "network"]
+#
+# - id: "RUNTIME-002"
+#   name: "Block specific user command"
+#   severity: medium
+#   pattern: 'docker\s+push'
+#   action: block
+#   message: "Blocked: Docker push disabled during incident response"
+#   tags: ["runtime", "docker"]

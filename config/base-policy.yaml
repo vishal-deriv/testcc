@@ -1,0 +1,267 @@
+---
+version: "1.0"
+description: "SafeSkillAgent base security policy - hardcoded safety rules"
+
+rules:
+  # === DESTRUCTIVE FILESYSTEM OPERATIONS ===
+  - id: "FS-001"
+    name: "Recursive force delete root"
+    description: "Blocks rm -rf / and variants that could wipe the filesystem"
+    severity: critical
+    pattern: 'rm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+(-[a-zA-Z]*f[a-zA-Z]*)?|(-[a-zA-Z]*f[a-zA-Z]*\s+)?-[a-zA-Z]*r[a-zA-Z]*)\s+(/\s*$|/\s+|--no-preserve-root)'
+    action: block
+    message: "BLOCKED: Recursive delete of root filesystem"
+    tags: ["destructive", "filesystem"]
+
+  - id: "FS-002"
+    name: "Format disk"
+    description: "Blocks disk formatting commands"
+    severity: critical
+    pattern: '(mkfs|mkfs\.\w+)\s+'
+    action: block
+    message: "BLOCKED: Disk formatting command detected"
+    tags: ["destructive", "filesystem"]
+
+  - id: "FS-003"
+    name: "DD to disk device"
+    description: "Blocks dd writing to raw disk devices"
+    severity: critical
+    pattern: 'dd\s+.*of=/dev/(sd[a-z]|nvme\d|hd[a-z]|vd[a-z]|disk\d|mmcblk\d)'
+    action: block
+    message: "BLOCKED: dd write to raw disk device"
+    tags: ["destructive", "filesystem"]
+
+  - id: "FS-004"
+    name: "Shred system files"
+    description: "Blocks shredding of system directories"
+    severity: critical
+    pattern: 'shred\s+.*(/etc/|/usr/|/boot/|/sys/|/var/)'
+    action: block
+    message: "BLOCKED: Shred of system files"
+    tags: ["destructive", "filesystem"]
+
+  - id: "FS-005"
+    name: "Wipe filesystem"
+    description: "Blocks wipefs on any device"
+    severity: critical
+    pattern: 'wipefs\s+'
+    action: block
+    message: "BLOCKED: Filesystem wipe detected"
+    tags: ["destructive", "filesystem"]
+
+  - id: "FS-006"
+    name: "Mass delete in system directories"
+    description: "Blocks rm -rf on system directories"
+    severity: critical
+    pattern: 'rm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+(-[a-zA-Z]*f[a-zA-Z]*)?|(-[a-zA-Z]*f[a-zA-Z]*\s+)?-[a-zA-Z]*r[a-zA-Z]*)\s+/(etc|usr|boot|sys|var|lib|sbin|bin|opt)\b'
+    action: block
+    message: "BLOCKED: Mass delete in system directory"
+    tags: ["destructive", "filesystem"]
+
+  # === NETWORK THREATS ===
+  - id: "NET-001"
+    name: "Outbound reverse shell"
+    description: "Blocks common reverse shell patterns"
+    severity: critical
+    pattern: '(bash|sh|zsh)\s+-i\s+>(&|\s)/dev/tcp/'
+    action: block
+    message: "BLOCKED: Reverse shell detected"
+    tags: ["network", "reverse-shell"]
+
+  - id: "NET-002"
+    name: "Netcat execute"
+    description: "Blocks netcat with execute flag"
+    severity: critical
+    pattern: '(nc|ncat|netcat)\s+.*(-e|--exec|--sh-exec)\s+'
+    action: block
+    message: "BLOCKED: Netcat with command execution"
+    tags: ["network", "reverse-shell"]
+
+  - id: "NET-003"
+    name: "Curl/wget pipe to shell"
+    description: "Blocks downloading and piping directly to a shell"
+    severity: critical
+    pattern: '(curl|wget)\s+[^\|]+\|\s*(sudo\s+)?(bash|sh|zsh|python[23]?|perl|ruby)'
+    action: block
+    message: "BLOCKED: Remote code download and execution"
+    tags: ["network", "remote-execution"]
+
+  - id: "NET-004"
+    name: "DNS tunneling"
+    description: "Blocks known DNS tunneling tools"
+    severity: high
+    pattern: '(iodine|dnscat2|dns2tcp)\s+'
+    action: block
+    message: "BLOCKED: DNS tunneling tool detected"
+    tags: ["network", "tunneling"]
+
+  - id: "NET-005"
+    name: "Port scan"
+    description: "Warns on common port scanning tools"
+    severity: medium
+    pattern: '(nmap|masscan|zmap)\s+'
+    action: warn
+    message: "WARNING: Port scanning tool detected"
+    tags: ["network", "reconnaissance"]
+    environments: ["staging", "production"]
+
+  # === PRIVILEGE ESCALATION ===
+  - id: "PRIV-001"
+    name: "Chmod world-writable"
+    description: "Blocks setting world-writable permissions"
+    severity: high
+    pattern: 'chmod\s+([0-7]*7[0-7]{2}|a\+w|o\+w)\s+'
+    action: block
+    message: "BLOCKED: World-writable permission change"
+    tags: ["privilege", "permissions"]
+
+  - id: "PRIV-002"
+    name: "Setuid bit"
+    description: "Blocks setting setuid/setgid bits"
+    severity: high
+    pattern: 'chmod\s+(u\+s|g\+s|[2-7][0-7]{3})\s+'
+    action: block
+    message: "BLOCKED: Setuid/setgid bit modification"
+    tags: ["privilege", "permissions"]
+
+  - id: "PRIV-003"
+    name: "Sudoers modification"
+    description: "Blocks direct modification of sudoers file"
+    severity: critical
+    pattern: '(echo|cat|tee|printf)\s+.*>+\s*/etc/sudoers'
+    action: block
+    message: "BLOCKED: Attempt to modify sudoers"
+    tags: ["privilege", "escalation"]
+
+  - id: "PRIV-004"
+    name: "Password file modification"
+    description: "Blocks direct writes to passwd/shadow files"
+    severity: critical
+    pattern: '(echo|cat|tee|printf)\s+.*>+\s*/etc/(passwd|shadow|group)'
+    action: block
+    message: "BLOCKED: Direct modification of auth files"
+    tags: ["privilege", "escalation"]
+
+  # === PERSISTENCE MECHANISMS ===
+  - id: "PERSIST-001"
+    name: "Crontab modification"
+    description: "Warns on crontab changes in production"
+    severity: medium
+    pattern: 'crontab\s+(-e|-l|-r|\S+\.cron)'
+    action: warn
+    message: "WARNING: Crontab modification detected"
+    tags: ["persistence", "cron"]
+    environments: ["production"]
+
+  - id: "PERSIST-002"
+    name: "Systemd service creation"
+    description: "Warns on new systemd service creation"
+    severity: medium
+    pattern: '(cp|mv|tee|cat)\s+.*\s+/etc/systemd/system/'
+    action: warn
+    message: "WARNING: Systemd service file creation"
+    tags: ["persistence", "systemd"]
+    environments: ["staging", "production"]
+
+  - id: "PERSIST-003"
+    name: "LaunchDaemon creation"
+    description: "Warns on new macOS LaunchDaemon creation"
+    severity: medium
+    pattern: '(cp|mv|tee|cat)\s+.*/Library/Launch(Daemons|Agents)/'
+    action: warn
+    message: "WARNING: LaunchDaemon/Agent creation detected"
+    tags: ["persistence", "launchd"]
+    environments: ["staging", "production"]
+
+  # === DATA PROTECTION ===
+  - id: "DATA-001"
+    name: "Sensitive file exfiltration"
+    description: "Blocks common data exfiltration patterns"
+    severity: critical
+    pattern: '(curl|wget|nc|scp|rsync)\s+.*(/etc/passwd|/etc/shadow|\.ssh/|\.gnupg/|\.aws/credentials)'
+    action: block
+    message: "BLOCKED: Sensitive file transfer detected"
+    tags: ["data", "exfiltration"]
+
+  - id: "DATA-002"
+    name: "Environment variable dump"
+    description: "Warns on dumping environment variables (may contain secrets)"
+    severity: medium
+    pattern: '(env|printenv|set)\s*(\||>)'
+    action: warn
+    message: "WARNING: Environment variable dump with redirect"
+    tags: ["data", "secrets"]
+
+  - id: "DATA-003"
+    name: "SSH key exfiltration"
+    description: "Blocks copying SSH keys to external destinations"
+    severity: critical
+    pattern: '(scp|rsync|curl)\s+.*\.ssh/(id_|authorized_keys|known_hosts)'
+    action: block
+    message: "BLOCKED: SSH key file transfer"
+    tags: ["data", "ssh"]
+
+  # === DANGEROUS PATTERNS ===
+  - id: "DANGER-001"
+    name: "Fork bomb"
+    description: "Blocks fork bomb patterns"
+    severity: critical
+    pattern: ':\(\)\s*\{\s*:\|:\s*&\s*\}'
+    action: block
+    message: "BLOCKED: Fork bomb detected"
+    tags: ["dos", "fork-bomb"]
+
+  - id: "DANGER-002"
+    name: "Dev null redirect of system"
+    description: "Blocks redirecting important devices to /dev/null"
+    severity: critical
+    pattern: '(mv|cp|cat)\s+/dev/null\s+/(etc|usr|boot|var|lib)'
+    action: block
+    message: "BLOCKED: Overwrite system paths with /dev/null"
+    tags: ["destructive"]
+
+  - id: "DANGER-003"
+    name: "History clearing"
+    description: "Warns on shell history manipulation (anti-forensics)"
+    severity: medium
+    pattern: '(history\s+-c|rm\s+.*\.(bash_history|zsh_history)|unset\s+HISTFILE|export\s+HISTSIZE=0)'
+    action: warn
+    message: "WARNING: Shell history clearing detected"
+    tags: ["anti-forensics"]
+
+  - id: "DANGER-004"
+    name: "Kernel module loading"
+    description: "Blocks loading/unloading kernel modules"
+    severity: high
+    pattern: '(insmod|rmmod|modprobe)\s+'
+    action: block
+    message: "BLOCKED: Kernel module manipulation"
+    tags: ["kernel", "rootkit"]
+
+  - id: "DANGER-005"
+    name: "Sysctl modification"
+    description: "Blocks runtime kernel parameter changes"
+    severity: high
+    pattern: 'sysctl\s+-w\s+'
+    action: block
+    message: "BLOCKED: Kernel parameter modification"
+    tags: ["kernel"]
+
+  # === CRYPTO MINING ===
+  - id: "MINE-001"
+    name: "Cryptocurrency miner"
+    description: "Blocks known crypto mining software"
+    severity: critical
+    pattern: '(xmrig|cgminer|bfgminer|cpuminer|minerd|ethminer|phoenixminer|t-rex|nbminer|gminer)\b'
+    action: block
+    message: "BLOCKED: Cryptocurrency miner detected"
+    tags: ["cryptominer"]
+
+  - id: "MINE-002"
+    name: "Mining pool connection"
+    description: "Blocks connections to mining pool protocols"
+    severity: critical
+    pattern: 'stratum\+tcp://'
+    action: block
+    message: "BLOCKED: Mining pool connection detected"
+    tags: ["cryptominer"]

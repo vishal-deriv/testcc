@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.safeskill.updater</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/opt/safeskill/src/setup/update.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SAFESKILL_INSTALL_DIR</key>
+        <string>/opt/safeskill/src</string>
+        <key>SAFESKILL_VENV_DIR</key>
+        <string>/opt/safeskill/venv</string>
+        <key>SAFESKILL_CONFIG_DIR</key>
+        <string>/etc/safeskill</string>
+        <key>SAFESKILL_LOG_DIR</key>
+        <string>/var/log/safeskill</string>
+    </dict>
+
+    <!-- Run every 30 minutes (1800 seconds) -->
+    <key>StartInterval</key>
+    <integer>1800</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/safeskill/updater-stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/safeskill/updater-stderr.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

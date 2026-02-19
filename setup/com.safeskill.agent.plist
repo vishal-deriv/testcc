@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.safeskill.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/safeskill-agent</string>
+        <string>start</string>
+        <string>--config-dir</string>
+        <string>/etc/safeskill</string>
+        <string>--log-dir</string>
+        <string>/var/log/safeskill</string>
+        <string>--socket</string>
+        <string>/tmp/safeskill.sock</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/safeskill/agent-stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/safeskill/agent-stderr.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/etc/safeskill</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SAFESKILL_TRUST_MODE</key>
+        <string>normal</string>
+        <key>SAFESKILL_ENVIRONMENT</key>
+        <string>dev</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>1024</integer>
+    </dict>
+</dict>
+</plist>

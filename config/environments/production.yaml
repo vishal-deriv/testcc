@@ -1,0 +1,19 @@
+---
+description: "Production environment - maximum security"
+
+disabled_rules: []
+
+severity_overrides:
+  "NET-005": "critical"    # Port scanning is critical in production
+  "DANGER-003": "high"     # History clearing is high in production
+  "DATA-002": "high"       # Env var dumps high in production
+  "PERSIST-001": "high"    # Crontab changes are high in production
+  "PERSIST-002": "critical" # Systemd changes are critical in production
+  "PERSIST-003": "critical" # LaunchDaemon changes are critical in production
+
+action_overrides:
+  "NET-005": "block"       # Block port scanning in production
+  "DANGER-003": "block"    # Block history clearing in production
+  "PERSIST-001": "block"   # Block crontab changes in production
+  "PERSIST-002": "block"   # Block systemd service changes in production
+  "PERSIST-003": "block"   # Block LaunchDaemon changes in production

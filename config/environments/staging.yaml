@@ -1,0 +1,10 @@
+---
+description: "Staging environment - balanced security"
+
+disabled_rules: []
+
+severity_overrides:
+  "NET-005": "high"      # Port scanning is high in staging
+  "DANGER-003": "medium" # History clearing medium in staging
+
+action_overrides: {}
