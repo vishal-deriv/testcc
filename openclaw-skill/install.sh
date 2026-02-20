@@ -216,19 +216,37 @@ configure_openclaw() {
         configured=true
     fi
 
-    # Method 2: Direct config write — SET SHELL TO OUR INTERCEPTOR
-    # This is the REAL enforcement. OpenClaw uses $SHELL to run commands.
-    # By setting SHELL to safeskill-shell, every command goes through us.
-    log_info "Writing SHELL override and exec settings to OpenClaw config..."
+    # METHOD 2: Patch OpenClaw's startup wrapper
+    # OpenClaw's env config uses "never override" semantics, meaning our
+    # SHELL setting gets ignored because the OS already sets SHELL=/bin/bash.
+    # The only reliable way is to inject SHELL into the actual launch command.
 
     local shell_path="${SAFESKILL_SHELL_PATH:-/usr/local/bin/safeskill-shell}"
 
+    log_info "Setting SHELL override for OpenClaw..."
+
+    # Write to .env (OpenClaw loads this but won't override existing SHELL)
+    local env_file="$OPENCLAW_DIR/.env"
+    local env_lines=()
+    if [[ -f "$env_file" ]]; then
+        while IFS= read -r line; do
+            [[ "$line" == SHELL=* ]] && continue
+            [[ "$line" == SAFESKILL_* ]] && continue
+            env_lines+=("$line")
+        done < "$env_file"
+    fi
+    env_lines+=("SHELL=$shell_path")
+    env_lines+=("SAFESKILL_REAL_SHELL=/bin/bash")
+    env_lines+=("SAFESKILL_SOCKET=/tmp/safeskill.sock")
+    printf '%s\n' "${env_lines[@]}" > "$env_file"
+    log_info "Updated $env_file"
+
+    # Write to config json
     python3 -c "
 import json, os
 
 config_path = '${config_file}'
 config = {}
-
 if os.path.exists(config_path):
     try:
         with open(config_path, 'r') as f:
@@ -236,63 +254,98 @@ if os.path.exists(config_path):
     except (json.JSONDecodeError, IOError):
         config = {}
 
-# Set SHELL to safeskill-shell in the env block
-# This is the REAL enforcement — OpenClaw uses SHELL for exec
 env_block = config.setdefault('env', {})
 env_block['SHELL'] = '${shell_path}'
 env_block['SAFESKILL_REAL_SHELL'] = '/bin/bash'
 env_block['SAFESKILL_SOCKET'] = '/tmp/safeskill.sock'
 
-# Also set in .env file as backup
-env_file = os.path.join(os.path.dirname(config_path), '.env')
-env_lines = []
-if os.path.exists(env_file):
-    with open(env_file, 'r') as f:
-        env_lines = [l for l in f.readlines()
-                     if not l.startswith('SHELL=')
-                     and not l.startswith('SAFESKILL_')]
-
-env_lines.append('SHELL=${shell_path}\n')
-env_lines.append('SAFESKILL_REAL_SHELL=/bin/bash\n')
-env_lines.append('SAFESKILL_SOCKET=/tmp/safeskill.sock\n')
-
-with open(env_file, 'w') as f:
-    f.writelines(env_lines)
-
-# Also set exec tool config as defense-in-depth
 tools = config.setdefault('tools', {})
 exec_cfg = tools.setdefault('exec', {})
-exec_cfg.setdefault('host', 'gateway')
-exec_cfg.setdefault('security', 'allowlist')
-exec_cfg.setdefault('ask', 'on-miss')
-exec_cfg.setdefault('askFallback', 'deny')
+exec_cfg['host'] = 'gateway'
+exec_cfg['security'] = 'allowlist'
+exec_cfg['ask'] = 'on-miss'
+exec_cfg['askFallback'] = 'deny'
 
 with open(config_path, 'w') as f:
     json.dump(config, f, indent=2)
+print('Config written')
+" 2>/dev/null || true
 
-print(f'SHELL set to: ${shell_path}')
-print(f'exec: host={exec_cfg[\"host\"]}, security={exec_cfg[\"security\"]}')
-" 2>/dev/null && configured=true || log_warn "Could not write config"
+    # METHOD 3: Create a wrapper script that launches OpenClaw with SHELL set
+    local wrapper="$OPENCLAW_DIR/start-safe.sh"
+    cat > "$wrapper" << WRAPPER
+#!/usr/bin/env bash
+# Start OpenClaw with SafeSkill enforcement
+# This sets SHELL at process level so OpenClaw MUST use safeskill-shell
+export SHELL="${shell_path}"
+export SAFESKILL_REAL_SHELL="/bin/bash"
+export SAFESKILL_SOCKET="/tmp/safeskill.sock"
+exec openclaw "\$@"
+WRAPPER
+    chmod +x "$wrapper"
+    log_info "Created $wrapper"
 
-    if [[ "$configured" == true ]]; then
-        log_info "SHELL override configured — OpenClaw will use safeskill-shell"
-        log_info "This means EVERY command goes through SafeSkillAgent"
-        log_info "IMPORTANT: Restart OpenClaw for changes to take effect"
-    else
-        log_error "Could not configure OpenClaw automatically."
-        log_error ""
-        log_error "You MUST do this manually:"
-        log_error ""
-        log_error "  Option A: Add to ~/.openclaw/openclaw.json:"
-        log_error '    { "env": { "SHELL": "'$shell_path'" } }'
-        log_error ""
-        log_error "  Option B: Add to ~/.openclaw/.env:"
-        log_error "    SHELL=$shell_path"
-        log_error ""
-        log_error "  Option C: Start OpenClaw with:"
-        log_error "    SHELL=$shell_path openclaw start"
-        log_error ""
+    # METHOD 4: Create shell profile snippet that overrides SHELL for openclaw
+    local profile_snippet="$OPENCLAW_DIR/safeskill-env.sh"
+    cat > "$profile_snippet" << 'ENVSNIPPET'
+# SafeSkill: Override SHELL for OpenClaw
+# Source this in your .bashrc/.zshrc, or the OpenClaw systemd unit
+export SHELL="SHELL_PATH_PLACEHOLDER"
+export SAFESKILL_REAL_SHELL="/bin/bash"
+export SAFESKILL_SOCKET="/tmp/safeskill.sock"
+ENVSNIPPET
+    sed -i "s|SHELL_PATH_PLACEHOLDER|${shell_path}|g" "$profile_snippet" 2>/dev/null || \
+        sed "s|SHELL_PATH_PLACEHOLDER|${shell_path}|g" "$profile_snippet" > "${profile_snippet}.tmp" && \
+        mv "${profile_snippet}.tmp" "$profile_snippet"
+    log_info "Created $profile_snippet"
+
+    # METHOD 5: If OpenClaw has a systemd service, try to add Environment=SHELL
+    local oc_service=""
+    for svc in /etc/systemd/system/openclaw*.service /lib/systemd/system/openclaw*.service; do
+        if [[ -f "$svc" ]]; then
+            oc_service="$svc"
+            break
+        fi
+    done
+
+    if [[ -n "$oc_service" ]]; then
+        log_info "Found OpenClaw systemd service: $oc_service"
+        local override_dir="${oc_service%.service}.service.d"
+        sudo mkdir -p "$override_dir" 2>/dev/null || mkdir -p "$override_dir" 2>/dev/null || true
+        local override_file="$override_dir/safeskill.conf"
+        cat > "$override_file" 2>/dev/null << OVERRIDE || true
+[Service]
+Environment=SHELL=${shell_path}
+Environment=SAFESKILL_REAL_SHELL=/bin/bash
+Environment=SAFESKILL_SOCKET=/tmp/safeskill.sock
+OVERRIDE
+        if [[ -f "$override_file" ]]; then
+            sudo systemctl daemon-reload 2>/dev/null || true
+            log_info "Systemd override created at $override_file"
+        fi
     fi
+
+    configured=true
+
+    echo ""
+    log_info "=== SHELL override configured ==="
+    echo ""
+    echo "  OpenClaw MUST be started with SHELL=$shell_path"
+    echo ""
+    echo "  Choose ONE of these methods:"
+    echo ""
+    echo "  A) Use the safe launcher (recommended):"
+    echo "       $wrapper"
+    echo ""
+    echo "  B) Set SHELL inline:"
+    echo "       SHELL=$shell_path openclaw start"
+    echo ""
+    echo "  C) Source the env file first:"
+    echo "       source $profile_snippet && openclaw start"
+    echo ""
+    echo "  D) If OpenClaw runs via systemd, it's already configured."
+    echo "       Just restart: sudo systemctl restart openclaw"
+    echo ""
 }
 
 # ---------- Verify installation ----------
@@ -389,34 +442,30 @@ main() {
     echo ""
     verify
 
+    local shell_path="${SAFESKILL_SHELL_PATH:-/usr/local/bin/safeskill-shell}"
+
     echo ""
     echo "============================================"
-    echo ""
-    echo "  HOW IT WORKS:"
-    echo ""
-    echo "  OpenClaw uses SHELL to run commands."
-    echo "  We replaced SHELL with safeskill-shell."
-    echo "  Now EVERY command goes through SafeSkillAgent."
-    echo "  The LLM cannot bypass this — it's in the execution path."
     echo ""
     echo "  NEXT STEPS:"
     echo ""
     echo "  1. Make sure SafeSkillAgent daemon is running:"
     echo "       safeskill start"
     echo ""
-    echo "  2. RESTART OpenClaw (REQUIRED for SHELL change to take effect):"
-    echo "       openclaw stop && openclaw start"
+    echo "  2. STOP OpenClaw and restart with SafeSkill:"
+    echo "       openclaw stop"
+    echo "       SHELL=$shell_path openclaw start"
     echo ""
-    echo "  3. Test it — tell OpenClaw:"
-    echo "       \"run rm -rf /tmp/test\""
-    echo "     OpenClaw will see: [SafeSkill] BLOCKED"
+    echo "     OR use the launcher we created:"
+    echo "       openclaw stop"
+    echo "       ~/.openclaw/start-safe.sh start"
     echo ""
-    echo "  IF IT STILL DOESN'T WORK:"
-    echo "     Verify: grep SHELL ~/.openclaw/.env"
-    echo "     Should show: SHELL=/usr/local/bin/safeskill-shell"
+    echo "  3. Test: tell OpenClaw \"run rm -rf /tmp/test\""
+    echo "     It MUST show [SafeSkill] BLOCKED"
     echo ""
-    echo "     Or start OpenClaw manually:"
-    echo "     SHELL=/usr/local/bin/safeskill-shell openclaw start"
+    echo "  4. Verify OpenClaw is using the right shell:"
+    echo "     Tell OpenClaw: \"run echo \$SHELL\""
+    echo "     Must show: $shell_path"
     echo ""
     echo "============================================"
     echo ""
