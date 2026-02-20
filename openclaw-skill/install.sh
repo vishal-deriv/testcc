@@ -166,15 +166,72 @@ install_hook() {
 
 # ---------- Configure OpenClaw exec settings ----------
 configure_openclaw() {
-    log_step "Configuring OpenClaw exec settings..."
+    log_step "Configuring OpenClaw exec enforcement..."
 
-    if ! command -v openclaw &>/dev/null; then
-        log_warn "'openclaw' CLI not found. Skipping auto-configuration."
-        log_warn "Manually add to your OpenClaw config:"
+    local config_file="$OPENCLAW_DIR/config.json"
+    local configured=false
+
+    # Method 1: Try openclaw CLI
+    if command -v openclaw &>/dev/null; then
+        log_info "Configuring via openclaw CLI..."
+
+        openclaw config set tools.exec.host gateway 2>/dev/null && \
+            log_info "Set tools.exec.host = gateway" || true
+        openclaw config set tools.exec.security allowlist 2>/dev/null && \
+            log_info "Set tools.exec.security = allowlist" || true
+        openclaw config set tools.exec.ask on-miss 2>/dev/null && \
+            log_info "Set tools.exec.ask = on-miss" || true
+        openclaw config set tools.exec.askFallback deny 2>/dev/null && \
+            log_info "Set tools.exec.askFallback = deny" || true
+
+        configured=true
+    fi
+
+    # Method 2: Direct config.json write/merge (always run as backup)
+    log_info "Ensuring config.json has exec enforcement settings..."
+
+    python3 -c "
+import json, os
+
+config_path = '${config_file}'
+config = {}
+
+if os.path.exists(config_path):
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        config = {}
+
+# Ensure tools.exec section exists with security settings
+tools = config.setdefault('tools', {})
+exec_cfg = tools.setdefault('exec', {})
+
+# CRITICAL: host must be 'gateway' for exec-approvals to apply
+# Without this, commands run in sandbox mode which skips approvals entirely
+exec_cfg.setdefault('host', 'gateway')
+exec_cfg.setdefault('security', 'allowlist')
+exec_cfg.setdefault('ask', 'on-miss')
+exec_cfg.setdefault('askFallback', 'deny')
+
+with open(config_path, 'w') as f:
+    json.dump(config, f, indent=2)
+
+print(f'Config written: host={exec_cfg[\"host\"]}, security={exec_cfg[\"security\"]}')
+" 2>/dev/null && configured=true || log_warn "Could not write config.json"
+
+    if [[ "$configured" == true ]]; then
+        log_info "OpenClaw exec enforcement configured"
+        log_info "IMPORTANT: host=gateway ensures exec-approvals are enforced"
+        log_info "IMPORTANT: Restart OpenClaw for changes to take effect"
+    else
+        log_error "Could not configure OpenClaw automatically."
+        log_error "You MUST add this to ~/.openclaw/config.json manually:"
         echo ""
         echo '  {'
         echo '    "tools": {'
         echo '      "exec": {'
+        echo '        "host": "gateway",'
         echo '        "security": "allowlist",'
         echo '        "ask": "on-miss",'
         echo '        "askFallback": "deny"'
@@ -182,21 +239,8 @@ configure_openclaw() {
         echo '    }'
         echo '  }'
         echo ""
-        return
+        log_error "Without host=gateway, OpenClaw runs commands WITHOUT approval checks!"
     fi
-
-    # Try to set exec defaults via openclaw CLI
-    openclaw config set tools.exec.security allowlist 2>/dev/null && \
-        log_info "Set tools.exec.security = allowlist" || \
-        log_warn "Could not set tools.exec.security (set manually)"
-
-    openclaw config set tools.exec.ask on-miss 2>/dev/null && \
-        log_info "Set tools.exec.ask = on-miss" || \
-        log_warn "Could not set tools.exec.ask (set manually)"
-
-    openclaw config set tools.exec.askFallback deny 2>/dev/null && \
-        log_info "Set tools.exec.askFallback = deny" || \
-        log_warn "Could not set tools.exec.askFallback (set manually)"
 }
 
 # ---------- Verify installation ----------

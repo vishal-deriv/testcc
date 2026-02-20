@@ -108,14 +108,16 @@ export default async function handler(ctx: HookContext): Promise<void> {
       `Rules: ${activeRules}, Signatures: ${sigCount}`
   );
 
-  // Enforce exec security policy
+  // Enforce exec security policy — host=gateway is CRITICAL
+  // Without it, OpenClaw runs in sandbox mode which skips all approval checks
   if (ctx.setExecDefaults) {
     ctx.setExecDefaults({
+      host: "gateway",
       security: "allowlist",
       ask: "on-miss",
       askFallback: "deny",
     });
-    log(ctx, "info", "Exec defaults set to: security=allowlist, ask=on-miss, askFallback=deny");
+    log(ctx, "info", "Exec defaults set to: host=gateway, security=allowlist, ask=on-miss, askFallback=deny");
   }
 
   // Inject bootstrap context so the LLM knows about security enforcement
