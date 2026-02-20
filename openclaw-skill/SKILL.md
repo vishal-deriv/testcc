@@ -2,8 +2,7 @@
 name: safeskill
 description: >
   Security enforcement agent that evaluates ALL shell commands BEFORE execution.
-  Blocks malicious, destructive, or policy-violating commands. MUST be consulted
-  before every exec tool call.
+  Commands are automatically checked at the shell level — no pre-check needed.
 version: 1.0.0
 tags:
   - security
@@ -17,72 +16,47 @@ bins:
 
 # SafeSkill — Command Security Enforcement
 
-You have a security agent running on this machine called **SafeSkillAgent**. It evaluates
-shell commands BEFORE execution and returns allow/block/warn verdicts. You MUST follow
-these rules for EVERY command you plan to execute.
+You have a security agent running on this machine called **SafeSkillAgent**. **Every shell command is AUTOMATICALLY checked** at the shell level before execution. You do NOT need to run `safeskill check` first — that would add unnecessary latency.
 
-## MANDATORY RULE — Pre-Execution Check
+## How it works
 
-**Before EVERY call to the `exec` tool**, you MUST first run:
-
-```bash
-safeskill check "<the exact command you plan to run>"
-```
-
-Read the output carefully:
-
-- If the result says **BLOCKED**: You MUST NOT execute that command. Tell the user it was
-  blocked and include the reason and severity from the output. Do NOT attempt to rephrase,
-  split, encode, or otherwise work around the block.
-
-- If the result says **WARNED**: You MAY proceed, but tell the user about the warning
-  before executing. Include the severity and message.
-
-- If the result says **ALLOWED**: Proceed normally with the `exec` tool.
-
-- If the `safeskill` command itself fails or times out: **Do NOT execute the original
-  command.** Tell the user the security agent is unreachable and commands cannot run
-  until it is restored. Suggest: `safeskill start` or check `systemctl status safeskill-agent`.
+- **Just use the exec tool** with your command. The shell intercepts it and checks with SafeSkill before execution.
+- If the command is blocked, exec will fail with `[SafeSkill] BLOCKED` (and optionally severity/reason) in the output. Tell the user it was blocked.
+- If you see `[SafeSkill] WARNING:`, the command ran — inform the user of the warning.
+- If exec succeeds with no SafeSkill message, the command was allowed.
 
 ## Examples
 
-### Allowed command
+### Blocked command (exec fails)
 
 ```
-> safeskill check "ls -la /tmp"
-[ALLOWED] ls -la /tmp
-  No threats detected
-  Evaluated in: 0.31ms
+> exec "rm -rf /"
+[SafeSkill] BLOCKED
+[SafeSkill] Severity: critical
+[SafeSkill] Reason: BLOCKED: Recursive delete of root filesystem
+exit 126
 ```
 
-Proceed to execute: `ls -la /tmp`
+Report to the user: "That command was blocked by the security agent."
 
-### Blocked command
-
-```
-> safeskill check "rm -rf /"
-[BLOCKED] rm -rf /
-  Severity: critical
-  Message: BLOCKED: Recursive delete of root filesystem
-  Rules: FS-001
-  Evaluated in: 0.42ms
-```
-
-DO NOT execute. Report to the user:
-"That command was blocked by the security agent. Reason: Recursive delete of root
-filesystem (severity: critical, rule FS-001)."
-
-### Warned command
+### Allowed command (exec succeeds)
 
 ```
-> safeskill check "nmap 192.168.1.0/24"
-[WARNED] nmap 192.168.1.0/24
-  Severity: medium
-  Message: WARNING: Port scanning tool detected
-  Evaluated in: 0.28ms
+> exec "ls -la /tmp"
+(output shows directory listing)
 ```
 
-Inform the user of the warning, then proceed if they confirm.
+No SafeSkill message means it was allowed.
+
+### Warned command (exec succeeds but warns)
+
+```
+> exec "nmap 192.168.1.0/24"
+[SafeSkill] WARNING: Port scanning tool detected
+(output continues)
+```
+
+Inform the user of the warning.
 
 ## What Gets Blocked (Non-Exhaustive)
 

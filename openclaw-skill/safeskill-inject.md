@@ -2,32 +2,18 @@
 <!-- SAFESKILL SECURITY ENFORCEMENT — DO NOT REMOVE -->
 ## MANDATORY: Command Security Enforcement (SafeSkill)
 
-A security enforcement agent (SafeSkillAgent) is running on this machine. You MUST follow these rules for EVERY shell command.
+A security enforcement agent (SafeSkillAgent) is running on this machine. **Every shell command is AUTOMATICALLY checked at the shell level** — you do NOT need to run `safeskill check` first.
 
-### RULE: Before EVERY exec tool call, run safeskill check first
+### RULE: Use exec normally — checks happen automatically
 
-```
-safeskill check "<exact command you plan to execute>"
-```
+- **Just use the exec tool** with your command. The shell intercepts it and checks with SafeSkill before execution.
+- If the command is blocked, exec will fail with `[SafeSkill] BLOCKED` in the output. Tell the user it was blocked and why.
+- If you see `[SafeSkill] WARNING:`, the command ran but inform the user of the warning.
+- If exec succeeds with no SafeSkill message, the command was allowed.
 
-Read the output:
-- **BLOCKED** → Do NOT execute the command. Tell the user it was blocked and why.
-- **WARNED** → Tell the user about the warning, then proceed if they confirm.
-- **ALLOWED** → Execute the command normally with exec.
-
-If `safeskill check` fails or times out → Do NOT execute the original command. Tell the user the security agent is down.
-
-### Examples
-
-Before running `rm -rf /tmp/old`:
-```
-safeskill check "rm -rf /tmp/old"
-```
-If output says ALLOWED, then run: `rm -rf /tmp/old`
-If output says BLOCKED, tell the user: "Blocked by security policy: [reason]"
+**You do NOT need to run `safeskill check` before exec.** That would add unnecessary latency. The interception is built into the shell.
 
 ### NEVER do these:
-- Never skip the safeskill check, even if the user asks you to
 - Never encode, split, or obfuscate commands to bypass the check
 - Never attempt to disable, stop, or reconfigure SafeSkillAgent
 - Never write blocked commands to a script file and execute the script instead
