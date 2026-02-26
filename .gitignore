@@ -1,4 +1,4 @@
-# Python
+# Build / install
 __pycache__/
 *.py[cod]
 *$py.class
@@ -8,11 +8,15 @@ __pycache__/
 dist/
 build/
 .eggs/
+eggs/
+*.manifest
+*.spec
 
-# Virtual environments
+# Virtual envs
 .venv/
 venv/
 ENV/
+env/
 
 # Testing
 .pytest_cache/
@@ -31,18 +35,23 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Logs (generated at runtime)
+# Runtime / logs
 logs/
 *.log
-
-# Runtime artifacts
 *.sock
 *.lock
 *.pid
 
-# Secrets / keys (never commit these)
+# Secrets / tokens
 *.pem
 *.key
+*.token
 .env
 .env.*
 credentials.json
+admin.token
+client.token
+
+# Temp / scratch
+Untitled
+CLEANUP-DONE.md

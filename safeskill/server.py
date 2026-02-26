@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import signal
 import stat
 import sys
@@ -70,7 +71,7 @@ class SafeSkillServer:
             )
             self._watcher.start()
 
-        self._app = web.Application()
+        self._app = web.Application(middlewares=[self._auth_middleware])
         self._app.router.add_post("/evaluate", self._handle_evaluate)
         self._app.router.add_get("/health", self._handle_health)
         self._app.router.add_get("/status", self._handle_status)
@@ -83,6 +84,33 @@ class SafeSkillServer:
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
 
+        # Create /var/run/safeskill (root-owned, 0755) — only daemon can create socket there
+        socket_dir = Path(self._config.socket_path).parent
+        socket_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(socket_dir, 0o755)
+        except OSError:
+            pass
+
+        # Generate client token for /evaluate; trap reads and sends it
+        self._client_token = secrets.token_urlsafe(32)
+        token_path = Path(self._config.client_token_path)
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(self._client_token, encoding="utf-8")
+        try:
+            os.chmod(self._config.client_token_path, 0o644)
+        except OSError:
+            pass
+
+        # Load admin token for admin endpoints (root-only)
+        self._admin_token: str | None = None
+        admin_path = Path(self._config.admin_token_path)
+        if admin_path.exists():
+            try:
+                self._admin_token = admin_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                pass
+
         socket_path = self._config.socket_path
         self._cleanup_socket(socket_path)
 
@@ -90,8 +118,7 @@ class SafeSkillServer:
         await unix_site.start()
 
         try:
-            # Socket must be world-readable/writable so non-root OpenClaw can connect.
-            # The socket only accepts JSON evaluation requests -- no shell access.
+            # Socket: world-readable/writable so non-root OpenClaw can connect
             os.chmod(socket_path, 0o666)
         except OSError:
             pass
@@ -110,6 +137,28 @@ class SafeSkillServer:
             tcp_site = web.TCPSite(self._runner, "127.0.0.1", self._config.http_port)
             await tcp_site.start()
             logger.info("http_server_started", port=self._config.http_port)
+
+    @web.middleware
+    async def _auth_middleware(
+        self, request: web.Request, handler: Any
+    ) -> web.Response:
+        """Validate tokens for /evaluate and admin endpoints."""
+        path = request.path
+        if path == "/evaluate":
+            token = request.headers.get("X-SafeSkill-Token", "")
+            if token != self._client_token:
+                return web.json_response(
+                    {"error": "Missing or invalid X-SafeSkill-Token"}, status=401
+                )
+        elif path in ("/policy/reload", "/policy/inject", "/trust-mode", "/environment"):
+            if self._admin_token:
+                admin = request.headers.get("X-SafeSkill-Admin-Token", "")
+                if admin != self._admin_token:
+                    return web.json_response(
+                        {"error": "Missing or invalid X-SafeSkill-Admin-Token"},
+                        status=401,
+                    )
+        return await handler(request)
 
     async def stop(self) -> None:
         """Gracefully stop the server."""
@@ -138,7 +187,7 @@ class SafeSkillServer:
             )
 
         result = self._evaluator.evaluate(eval_request)
-        self._audit.log_evaluation(result, source=eval_request.source)
+        self._audit.log_evaluation(result, source=eval_request.source, user=eval_request.user)
 
         return web.json_response({
             "verdict": result.verdict.value,

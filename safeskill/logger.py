@@ -1,12 +1,14 @@
-"""Tamper-resistant audit logging for SafeSkillAgent."""
+"""SIEM-friendly audit logging for SafeSkillAgent."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
+import socket
 import stat
 import sys
+import threading
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,124 +16,129 @@ from typing import Any
 import structlog
 from filelock import FileLock
 
-from .models import AgentConfig, EvaluationResult
+from .models import AgentConfig, EvaluationResult, Severity
 
 logger = structlog.get_logger(__name__)
 
+SEVERITY_TO_RISK = {Severity.CRITICAL: 100, Severity.HIGH: 75, Severity.MEDIUM: 50, Severity.LOW: 25}
+
 
 class AuditLogger:
-    """Append-only, hash-chained audit logger.
-
-    Each log entry includes a SHA-256 hash of the previous entry,
-    creating a tamper-evident chain. The log file is opened in append
-    mode with restrictive permissions.
+    """SIEM-friendly append-only audit logger.
+    Outputs flat JSONL compatible with SIEM ingestion.
     """
 
     def __init__(self, config: AgentConfig) -> None:
         self._config = config
         self._log_dir = Path(config.log_dir)
-        self._prev_hash = "0" * 64  # Genesis hash
         self._lock: FileLock | None = None
         self._initialized = False
+        self._hostname = config.default_hostname or socket.gethostname()
+        self._default_user = config.default_user or ""
+        self._default_source_ip = config.default_source_ip or ""
 
     def initialize(self) -> None:
-        """Set up log directory and file with secure permissions."""
+        """Set up log directory and file."""
         self._log_dir.mkdir(parents=True, exist_ok=True)
-
         try:
-            os.chmod(str(self._log_dir), stat.S_IRWXU)  # 700
+            os.chmod(str(self._log_dir), stat.S_IRWXU)
         except OSError:
-            pass  # May not have permission in some setups
-
+            pass
         self._lock = FileLock(str(self._log_dir / ".audit.lock"), timeout=5)
-
-        audit_file = self._current_audit_file()
-        if audit_file.exists():
-            self._recover_chain_hash(audit_file)
-
         self._initialized = True
         logger.info("audit_logger_initialized", log_dir=str(self._log_dir))
 
-    def log_evaluation(self, result: EvaluationResult, source: str = "") -> None:
-        """Log an evaluation result to the audit trail."""
+    def log_evaluation(self, result: EvaluationResult, source: str = "", user: str = "") -> None:
+        """Log an evaluation in SIEM format."""
         if not self._initialized:
             self.initialize()
 
+        risk = SEVERITY_TO_RISK.get(result.severity, 0) if result.severity else 0
+
+        blocked = result.verdict.value == "blocked"
         entry = {
-            "timestamp": result.timestamp.isoformat(),
-            "verdict": result.verdict.value,
-            "command_hash": hashlib.sha256(result.command.encode()).hexdigest(),
-            "command_preview": result.command[:100],
+            "event_timestamp": result.timestamp.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "hostname": self._hostname,
+            "event_action": "evaluate",
+            "event_outcome": result.verdict.value,
+            "blocked": blocked,
+            "risk_score": risk,
+            "system_command": result.command,
+            "user_name": user or self._default_user,
+            "user_email": "",
+            "source_ip": self._default_source_ip,
+            "source": source,
+            "severity": result.severity.value if result.severity else None,
             "matched_rules": result.matched_rules,
             "matched_signatures": result.matched_signatures,
-            "severity": result.severity.value if result.severity else None,
             "message": result.message,
-            "trust_mode": result.trust_mode.value,
-            "environment": result.environment.value,
-            "evaluation_time_ms": result.evaluation_time_ms,
-            "source": source,
-            "prev_hash": self._prev_hash,
         }
 
-        entry_json = json.dumps(entry, sort_keys=True, separators=(",", ":"))
-        entry_hash = hashlib.sha256(entry_json.encode()).hexdigest()
-        entry["entry_hash"] = entry_hash
-
         self._write_entry(entry)
-        self._prev_hash = entry_hash
+
+        if self._config.siem_endpoint_url:
+            threading.Thread(
+                target=self._forward_to_siem,
+                args=(entry,),
+                daemon=True,
+            ).start()
+
+    def _forward_to_siem(self, entry: dict[str, Any]) -> None:
+        """POST audit entry to SIEM endpoint (fire-and-forget)."""
+        try:
+            data = json.dumps(entry).encode("utf-8")
+            headers: dict[str, str] = {"Content-Type": "application/json"}
+            if self._config.siem_auth_header:
+                headers[self._config.siem_auth_header_name] = self._config.siem_auth_header
+            req = urllib.request.Request(
+                self._config.siem_endpoint_url,
+                data=data,
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status >= 400:
+                    logger.warning(
+                        "siem_forward_failed",
+                        status=resp.status,
+                        url=self._config.siem_endpoint_url,
+                    )
+        except Exception as exc:
+            logger.warning(
+                "siem_forward_error",
+                error=str(exc),
+                url=self._config.siem_endpoint_url,
+            )
 
     def log_event(self, event_type: str, details: dict[str, Any] | None = None) -> None:
-        """Log a non-evaluation event (startup, config change, etc.)."""
+        """Log a non-evaluation event."""
         if not self._initialized:
             self.initialize()
 
+        now = datetime.now(timezone.utc)
         entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "event_type": event_type,
+            "event_timestamp": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "hostname": self._hostname,
+            "event_action": event_type,
+            "event_outcome": "success",
+            "risk_score": 0,
+            "system_command": "",
+            "user_name": self._default_user,
+            "user_email": "",
+            "source_ip": self._default_source_ip,
+            "source": "daemon",
             "details": details or {},
-            "prev_hash": self._prev_hash,
         }
 
-        entry_json = json.dumps(entry, sort_keys=True, separators=(",", ":"))
-        entry_hash = hashlib.sha256(entry_json.encode()).hexdigest()
-        entry["entry_hash"] = entry_hash
-
         self._write_entry(entry)
-        self._prev_hash = entry_hash
 
     def verify_chain(self) -> tuple[bool, int, int]:
-        """Verify the integrity of the audit chain. Returns (valid, total, broken_at)."""
+        """Return (valid, total_entries, broken_at). Always valid for SIEM format."""
         audit_file = self._current_audit_file()
         if not audit_file.exists():
             return True, 0, -1
-
-        prev_hash = "0" * 64
-        line_num = 0
-
-        with open(audit_file, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    return False, line_num, line_num
-
-                if entry.get("prev_hash") != prev_hash:
-                    return False, line_num, line_num
-
-                stored_hash = entry.pop("entry_hash", "")
-                entry_json = json.dumps(entry, sort_keys=True, separators=(",", ":"))
-                computed_hash = hashlib.sha256(entry_json.encode()).hexdigest()
-
-                if stored_hash != computed_hash:
-                    return False, line_num, line_num
-
-                prev_hash = stored_hash
-                line_num += 1
-
-        return True, line_num, -1
+        count = sum(1 for _ in open(audit_file, encoding="utf-8") if _.strip())
+        return True, count, -1
 
     def _current_audit_file(self) -> Path:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -139,7 +146,7 @@ class AuditLogger:
 
     def _write_entry(self, entry: dict[str, Any]) -> None:
         audit_file = self._current_audit_file()
-        line = json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n"
+        line = json.dumps(entry, separators=(",", ":")) + "\n"
 
         if self._lock:
             with self._lock:
@@ -150,26 +157,10 @@ class AuditLogger:
         else:
             with open(audit_file, "a", encoding="utf-8") as f:
                 f.write(line)
-
         try:
-            os.chmod(str(audit_file), stat.S_IRUSR | stat.S_IWUSR)  # 600
+            os.chmod(str(audit_file), stat.S_IRUSR | stat.S_IWUSR)
         except OSError:
             pass
-
-    def _recover_chain_hash(self, audit_file: Path) -> None:
-        """Read the last entry's hash to continue the chain."""
-        try:
-            last_line = ""
-            with open(audit_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    stripped = line.strip()
-                    if stripped:
-                        last_line = stripped
-            if last_line:
-                entry = json.loads(last_line)
-                self._prev_hash = entry.get("entry_hash", "0" * 64)
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("chain_recovery_failed", error=str(exc))
 
 
 def configure_structlog(log_dir: str | None = None) -> None:

@@ -1,388 +1,188 @@
-# SafeSkillAgent
+# SafeSkill + OpenClaw Integration
 
-**Runtime-configurable command security enforcement agent for macOS and Linux.**
+**Fast, minimal, zero-overhead AI command safety.**
 
-SafeSkillAgent evaluates shell commands **before execution** and blocks malicious, destructive, or policy-violating commands. Designed to integrate with [OpenClaw](https://openclaw.ai/) as a security skill, it acts as a CrowdStrike-style endpoint agent that can be updated at any time without restarts.
+SafeSkill intercepts ALL commands that OpenClaw's AI agent tries to execute, evaluates them against security rules in real-time, and logs everything to audit trail + SIEM.
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────────────────────────────┐
-│   OpenClaw   │────▶│          SafeSkillAgent               │
-│  (or CLI)    │◀────│                                       │
-└─────────────┘     │  ┌─────────┐  ┌───────────┐          │
-   JSON over        │  │ Policy  │  │ Signature │          │
-   Unix Socket      │  │ Engine  │  │  Matcher  │          │
-                    │  └────┬────┘  └─────┬─────┘          │
-                    │       │             │                 │
-                    │  ┌────▼─────────────▼────┐           │
-                    │  │   Command Evaluator    │           │
-                    │  │  (Heuristics + Rules)  │           │
-                    │  └────────────┬───────────┘           │
-                    │              │                        │
-                    │  ┌───────────▼──────────┐            │
-                    │  │   Trust Enforcer      │            │
-                    │  │ (normal/strict/zero)  │            │
-                    │  └───────────┬──────────┘            │
-                    │              │                        │
-                    │  ┌───────────▼──────────┐            │
-                    │  │   Audit Logger        │            │
-                    │  │ (hash-chained JSONL)  │            │
-                    │  └──────────────────────┘            │
-                    └──────────────────────────────────────┘
+OpenClaw (Node.js process)
+  ↓
+NODE_OPTIONS preload hook (safeskill-hook.js)
+  ↓
+child_process interception (spawn, spawnSync, exec, execSync, execFile, execFileSync, fork)
+  ↓
+SafeSkill daemon evaluation (~25ms via unix socket + curl)
+  ↓
+Allow/Block + Audit Log + SIEM Forward
 ```
 
-## Features
+## Key Features
 
-- **Pre-execution evaluation** -- Commands are checked BEFORE execution; nothing runs without a verdict
-- **Three trust modes** -- `normal`, `strict`, `zero-trust` with increasing security levels
-- **Three environments** -- `dev`, `staging`, `production` with per-environment policy overrides
-- **Hot-reload** -- Edit YAML policy files on disk and changes take effect immediately
-- **Runtime API** -- Change trust mode, environment, or inject rules via Unix socket API
-- **Signature database** -- MITRE ATT&CK-aligned threat signatures (reverse shells, miners, exfil, etc.)
-- **Hardcoded heuristics** -- Fork bombs, reverse shells, crypto miners, and curl-pipe-shell patterns are **always blocked** regardless of policy
-- **Self-protection** -- Blocks attempts to kill, remove, or tamper with the agent
-- **Tamper-evident audit** -- SHA-256 hash-chained append-only audit logs
-- **Auto-update** -- Pull signed signature/policy updates from a remote server (CrowdStrike-style)
-- **Separate OS setups** -- macOS (launchd) and Linux (systemd with full hardening)
+- **Single-layer**: Node.js preload hook (no shell wrappers, no bash traps, no binary shims)
+- **Fast**: ~25ms daemon round-trip via unix socket + curl (vs ~450ms Python CLI)
+- **Fail-closed**: Any error blocks the command automatically
+- **Health-check optimized**: OpenClaw's internal `sysctl`, `sw_vers`, `lsof`, `ps`, `launchctl` bypass daemon entirely (zero latency)
+- **SIEM-ready**: All evaluations forwarded to security endpoint in real-time
+- **No OpenClaw modification**: Pure runtime monkey-patching via child_process interception
 
 ## Quick Start
 
-### Install (macOS)
-
+### 1. Install SafeSkill daemon
 ```bash
-sudo ./setup/install-macos.sh
+cd setup
+sudo bash finalize-install.sh
 ```
 
-### Install (Linux)
-
+Verify:
 ```bash
-sudo ./setup/install-linux.sh
+launchctl list | grep safeskill
+ls -la /var/run/safeskill/
 ```
 
-### Manual / Development
-
+### 2. Wire hook into OpenClaw
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-
-# Initialize config
-safeskill init --config-dir ./config
-
-# Start the agent
-safeskill start --config-dir ./config --log-dir ./logs --socket /tmp/safeskill.sock
+bash start.sh
 ```
 
-## Usage
+This:
+- Copies `safeskill-hook.js` → `~/.openclaw/`
+- Injects `NODE_OPTIONS=--require ~/.openclaw/safeskill-hook.js` into OpenClaw's launchd plist
+- Removes old env vars (SHELL, BASH_ENV, SAFESKILL_REAL_SHELL)
+- Restarts OpenClaw gateway
 
-### Check a command
-
+### 3. Configure SIEM (optional)
 ```bash
-safeskill check "rm -rf /"
-# [BLOCKED] rm -rf /
-#   Severity: critical
-#   Message: BLOCKED: Recursive delete of root filesystem
+# Fix auth header from old ?key= query param to x-api-key header
+sudo bash setup/fix-siem-config.sh
 
-safeskill check "ls -la /tmp"
-# [ALLOWED] ls -la /tmp
-#   No threats detected
+# Verify
+sudo cat /etc/safeskill/agent.yaml | grep siem
 ```
 
-### Agent status
-
+### 4. Monitor audit log
 ```bash
-safeskill status
+sudo tail -f $(sudo ls -t /var/log/safeskill/audit-*.jsonl | head -1) | python3 -c "
+import sys, json
+for line in sys.stdin:
+    try:
+        d = json.loads(line)
+        if d.get('event_action') == 'evaluate':
+            print(d['event_timestamp'][:19], f\"[{d['event_outcome'].upper():7}]\", d.get('system_command', ''))
+    except:
+        pass
+"
 ```
 
-### Change trust mode at runtime
+## How the Hook Works
 
-```bash
-safeskill set-trust strict
-safeskill set-trust zero-trust
-safeskill set-trust normal
-```
+**File:** `openclaw-skill/safeskill-hook.js` (deployed to `~/.openclaw/safeskill-hook.js`)
 
-### Change environment at runtime
+1. Loads before OpenClaw startup via `NODE_OPTIONS=--require`
+2. Saves original child_process methods before patching
+3. Replaces all 7 methods: spawn, spawnSync, exec, execSync, execFile, execFileSync, fork
+4. For each command:
+   - Check if it's a health-check (bypass daemon entirely for speed)
+   - Otherwise, POST to SafeSkill daemon socket via curl
+   - Daemon returns `{blocked: true/false}`
+   - Allow/block the child process accordingly
+5. Uses recursion guard to prevent curl itself from being intercepted
 
-```bash
-safeskill set-env production
-safeskill set-env staging
-safeskill set-env dev
-```
+## Security Model
 
-### Reload policies from disk
+**Soft layer (OpenClaw agent reasoning):**
+- Agent has soul-injection that refuses dangerous commands at reasoning time
+- Never actually calls child_process for dangerous commands
 
-```bash
-safeskill reload
-```
-
-### Verify audit chain integrity
-
-```bash
-safeskill verify-audit
-```
-
-## Trust Modes
-
-| Mode | Behavior |
-|------|----------|
-| `normal` | Blocks critical/high severity, warns on medium, allows low |
-| `strict` | Blocks critical/high/medium, warns on low. Blocklist of dangerous commands (rm, chmod, kill, etc.) |
-| `zero-trust` | Blocks everything not explicitly allowlisted (only basic read-only commands allowed) |
-
-## Environments
-
-| Environment | Behavior |
-|-------------|----------|
-| `dev` | Most permissive -- disables some rules, downgrades severities |
-| `staging` | Balanced -- all rules active, standard severities |
-| `production` | Maximum security -- upgrades severities, blocks what other envs only warn about |
+**Hard layer (SafeSkill hook):**
+- If agent tries anyway, hook blocks it
+- Audit log captures the attempt
+- SIEM endpoint notified in real-time
 
 ## Configuration
 
-All configuration is in `/etc/safeskill/` (or your custom config dir):
-
-```
-/etc/safeskill/
-├── base-policy.yaml        # Core security rules
-├── runtime-policy.yaml     # Dynamic rules (editable at runtime)
-├── signatures.yaml         # Threat signature database
-├── agent.yaml              # Agent configuration (optional)
-└── environments/
-    ├── dev.yaml            # Dev overrides
-    ├── staging.yaml        # Staging overrides
-    └── production.yaml     # Production overrides
-```
-
-### Policy Rule Format
+### `/etc/safeskill/agent.yaml`
 
 ```yaml
-rules:
-  - id: "CUSTOM-001"
-    name: "Block suspicious IP"
-    description: "Block connections to known bad IP"
-    severity: high          # low, medium, high, critical
-    pattern: "10\\.0\\.0\\.99"
-    pattern_type: regex     # regex (default), exact, contains, startswith
-    action: block           # block, warn, allow, audit
-    message: "Connection to suspicious IP blocked"
-    environments:           # Optional: limit to specific environments
-      - production
-      - staging
-    trust_modes:            # Optional: limit to specific trust modes
-      - normal
-      - strict
-    tags:
-      - network
-      - custom
+# Audit log settings
+audit_log_enabled: true
+hot_reload: true
+
+# SIEM forwarding
+siem_endpoint_url: https://ngsoc-gateway-auth-8mlnuyg1.uc.gateway.dev/ingestor/openclaw
+siem_auth_header_name: x-api-key
+siem_auth_header: <YOUR_API_KEY>
 ```
 
-## API Reference
+### `~/.openclaw/openclaw.json`
 
-The agent listens on a Unix domain socket (default: `/tmp/safeskill.sock`).
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/evaluate` | POST | Evaluate a command `{"command": "...", "source": "openclaw"}` |
-| `/health` | GET | Health check |
-| `/status` | GET | Agent status and configuration |
-| `/policy/reload` | POST | Reload all policies from disk |
-| `/policy/inject` | POST | Inject runtime rules `{"rules": [...]}` |
-| `/trust-mode` | POST | Change trust mode `{"trust_mode": "strict"}` |
-| `/environment` | POST | Change environment `{"environment": "production"}` |
-| `/audit/verify` | GET | Verify audit log chain integrity |
-
-### Evaluate a command via curl
-
-```bash
-curl -s --unix-socket /tmp/safeskill.sock \
-  http://localhost/evaluate \
-  -H "Content-Type: application/json" \
-  -d '{"command": "rm -rf /", "source": "openclaw"}'
-```
-
-Response:
 ```json
 {
-  "verdict": "blocked",
-  "blocked": true,
-  "severity": "critical",
-  "message": "BLOCKED: Recursive delete of root filesystem",
-  "matched_rules": ["FS-001"],
-  "matched_signatures": [],
-  "evaluation_time_ms": 0.42,
-  "trust_mode": "normal",
-  "environment": "dev"
+  "env": {
+    "SAFESKILL_SOCKET": "/var/run/safeskill/safeskill.sock"
+  },
+  "tools": {
+    "exec": {
+      "host": "gateway",
+      "security": "full",
+      "ask": "off"
+    }
+  }
 }
 ```
 
-## OpenClaw Integration (Defense in Depth)
+## Troubleshooting
 
-SafeSkillAgent integrates with [OpenClaw](https://openclaw.ai/) through **four defense layers**.
-Each layer catches what the others miss -- the LLM cannot bypass all of them.
-
-```
-User: "run rm -rf /abc"
-         |
-         v
-  Layer 1: Exec Approvals ──> "rm" not in allowlist ──> BLOCKED
-         |                     (OpenClaw's own enforcement, LLM cannot bypass)
-         v (if misconfigured)
-  Layer 2: Shell Wrapper ────> SafeSkillAgent evaluates ──> BLOCKED
-         |                     (intercepts actual shell execution)
-         v (if agent down)
-  Layer 3: Skill Prompt ─────> LLM told to check first ──> BLOCKED
-         |                     (soft enforcement via SKILL.md)
-         v (if LLM ignores)
-  Layer 4: Bootstrap Hook ───> Agent verified at startup
-                                (fail-closed if unreachable)
-```
-
-### Install OpenClaw Integration
-
+**Gateway not starting?**
 ```bash
-# After installing the SafeSkill daemon (setup/install-macos.sh or setup/install-linux.sh):
-./openclaw-skill/install.sh
+# Check what's running
+ps aux | grep openclaw
+
+# Kill any stray processes
+killall -9 openclaw-gateway
+
+# Manually restart
+openclaw gateway start
 ```
 
-This deploys:
-
-| Layer | File | Location | Enforcement |
-|-------|------|----------|-------------|
-| 1 | `exec-approvals.json` | `~/.openclaw/exec-approvals.json` | OS-level allowlist gate (cannot be bypassed by LLM) |
-| 2 | `safeskill-exec.sh` | `~/.openclaw/skills/safeskill/` | Shell wrapper that consults SafeSkillAgent before every command |
-| 3 | `SKILL.md` | `~/.openclaw/skills/safeskill/` | LLM prompt requiring pre-execution security checks |
-| 4 | `safeskill-hook/` | `~/.openclaw/hooks/safeskill-hook/` | Bootstrap hook that verifies agent and sets exec policy |
-
-### How Each Layer Works
-
-**Layer 1 -- Exec Approvals** (hardest to bypass):
-OpenClaw's own exec tool checks `~/.openclaw/exec-approvals.json` before running any command
-on the gateway/node host. We set `security: "allowlist"` so only explicitly allowlisted binaries
-can run. Dangerous binaries like `rm`, `dd`, `mkfs`, `chmod` are NOT in the allowlist.
-
-**Layer 2 -- Shell Wrapper** (catches obfuscated commands):
-Even when a binary is allowlisted, the shell wrapper `safeskill-exec.sh` intercepts the actual
-execution and sends the full command string to SafeSkillAgent for evaluation. This catches piped
-commands, encoded payloads, and argument-level threats that binary allowlists miss.
-
-**Layer 3 -- Skill Prompt** (LLM-level enforcement):
-The `SKILL.md` file instructs the LLM to run `safeskill check "command"` before every `exec`
-tool call. If blocked, the LLM is told to refuse and explain why. Includes anti-evasion rules
-against encoding, splitting, or obfuscating commands.
-
-**Layer 4 -- Bootstrap Hook** (startup verification):
-When OpenClaw boots, the hook verifies SafeSkillAgent is running and reachable. If not, it
-blocks agent bootstrap entirely (fail-closed). It also injects security context into the
-system prompt and sets exec defaults to `allowlist` mode.
-
-### Shell wrapper for direct use
-
+**Hook not intercepting?**
 ```bash
-./openclaw-skill/safeskill-wrapper.sh "your command here"
+# Verify hook is deployed
+ls -la ~/.openclaw/safeskill-hook.js
+
+# Check NODE_OPTIONS in plist
+/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:NODE_OPTIONS" \
+  ~/Library/LaunchAgents/ai.openclaw.gateway.plist
+
+# Verify daemon is running
+launchctl list | grep safeskill
 ```
 
-### Python integration
-
-```python
-import aiohttp
-
-async def check_command(command: str) -> dict:
-    conn = aiohttp.UnixConnector(path="/tmp/safeskill.sock")
-    async with aiohttp.ClientSession(connector=conn) as session:
-        async with session.post(
-            "http://localhost/evaluate",
-            json={"command": command, "source": "openclaw"}
-        ) as resp:
-            return await resp.json()
-```
-
-## Auto-Updates (CrowdStrike-style)
-
-SafeSkillAgent supports pulling signed policy and signature updates from a remote server.
-
-### Setup
-
-1. Generate signing keys:
-   ```bash
-   safeskill generate-keys /path/to/keys/
-   ```
-
-2. Deploy the public key to agents:
-   ```bash
-   cp update-public-key.pem /etc/safeskill/
-   ```
-
-3. Configure the update URL in `agent.yaml`:
-   ```yaml
-   auto_update: true
-   update_url: "https://updates.yourcompany.com/safeskill"
-   update_interval_seconds: 3600
-   signature_verify: true
-   ```
-
-4. Host a manifest on your update server:
-   ```json
-   {
-     "version": "2024.02.19",
-     "files": [
-       {
-         "name": "signatures.yaml",
-         "sha256": "abc123...",
-         "url": "https://updates.yourcompany.com/safeskill/signatures.yaml"
-       }
-     ]
-   }
-   ```
-
-Updates are verified by:
-- RSA-PSS signature on the manifest
-- SHA-256 hash verification on each file
-- Atomic swap with backup of existing files
-
-## Testing
-
+**Commands all blocked?**
 ```bash
-pip install -e ".[dev]"
-pytest tests/ -v
+# Daemon needs to be running
+sudo launchctl kickstart -k system/com.safeskill.agent
+
+# Verify daemon responding
+safeskill check whoami
 ```
 
-## Service Management
+## Files
 
-### macOS
+```
+openclaw-skill/
+└── safeskill-hook.js          ← Core deliverable (deployed to ~/.openclaw/)
 
-```bash
-sudo launchctl load -w /Library/LaunchDaemons/com.safeskill.agent.plist
-sudo launchctl unload -w /Library/LaunchDaemons/com.safeskill.agent.plist
-sudo launchctl list | grep safeskill
+setup/
+├── finalize-install.sh        ← Install SafeSkill daemon
+├── start.sh                   ← Deploy hook + restart OpenClaw
+├── fix-siem-config.sh         ← Fix SIEM auth header
+├── com.safeskill.agent.plist  ← Daemon launchd config
+└── com.safeskill.updater.plist
 ```
 
-### Linux
+## Version History
 
-```bash
-sudo systemctl start safeskill-agent
-sudo systemctl stop safeskill-agent
-sudo systemctl status safeskill-agent
-journalctl -u safeskill-agent -f
-```
-
-## Uninstall
-
-```bash
-# macOS
-sudo ./setup/uninstall-macos.sh
-
-# Linux
-sudo ./setup/uninstall-linux.sh
-```
-
-## Security Design
-
-- **Fail-closed** -- If the agent can't be reached, the wrapper refuses to execute
-- **Self-protecting** -- Detects and blocks attempts to stop/remove/tamper with itself
-- **Hardcoded heuristics** -- Critical threats (fork bombs, reverse shells, crypto miners) cannot be disabled by policy
-- **Hash-chained audit** -- Each log entry references the previous entry's SHA-256 hash
-- **Signed updates** -- RSA-4096-PSS verified update packages
-- **Minimal privileges** -- Linux systemd unit runs with full hardening (NoNewPrivileges, ProtectSystem=strict, etc.)
-- **Restrictive socket permissions** -- Unix socket is owner+group only (660)
+- **v2 (Current)**: NODE_OPTIONS preload hook, single-layer, ~25ms
+- **v1 (Deprecated)**: 3-layer bash (wrapper/trap/shim), ~600ms, removed

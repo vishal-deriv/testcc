@@ -24,7 +24,7 @@ console = Console()
 
 DEFAULT_CONFIG_DIR = "/etc/safeskill"
 DEFAULT_LOG_DIR = "/var/log/safeskill"
-DEFAULT_SOCKET = "/tmp/safeskill.sock"
+DEFAULT_SOCKET = "/var/run/safeskill/safeskill.sock"
 
 
 def _load_agent_config(
@@ -66,19 +66,44 @@ def _load_agent_config(
     return AgentConfig(**config_data)
 
 
-def _send_to_socket(socket_path: str, method: str, path: str, body: dict | None = None) -> dict:
+def _read_token(path: str) -> str | None:
+    """Read token from file if readable."""
+    try:
+        p = Path(path)
+        if p.exists() and p.is_file():
+            return p.read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    return None
+
+
+def _send_to_socket(
+    socket_path: str,
+    method: str,
+    path: str,
+    body: dict | None = None,
+    *,
+    client_token: str | None = None,
+    admin_token: str | None = None,
+) -> dict:
     """Send an HTTP-like request over Unix socket and return the JSON response."""
     import aiohttp
+
+    headers: dict[str, str] = {}
+    if path == "/evaluate" and client_token:
+        headers["X-SafeSkill-Token"] = client_token
+    elif path in ("/policy/reload", "/policy/inject", "/trust-mode", "/environment") and admin_token:
+        headers["X-SafeSkill-Admin-Token"] = admin_token
 
     async def _do() -> dict:
         conn = aiohttp.UnixConnector(path=socket_path)
         async with aiohttp.ClientSession(connector=conn) as session:
             url = f"http://localhost{path}"
             if method == "GET":
-                async with session.get(url) as resp:
+                async with session.get(url, headers=headers or None) as resp:
                     return await resp.json()  # type: ignore[no-any-return]
             else:
-                async with session.post(url, json=body or {}) as resp:
+                async with session.post(url, json=body or {}, headers=headers or None) as resp:
                     return await resp.json()  # type: ignore[no-any-return]
 
     return asyncio.run(_do())
@@ -141,8 +166,14 @@ def start(
 @click.argument("command")
 def check(socket_path: str, command: str) -> None:
     """Check a command against the security policy."""
+    token = _read_token("/var/run/safeskill/client.token")
+    if not token:
+        console.print("[red]Client token not found. Is the daemon running?[/red]")
+        sys.exit(1)
     try:
-        result = _send_to_socket(socket_path, "POST", "/evaluate", {"command": command})
+        result = _send_to_socket(
+            socket_path, "POST", "/evaluate", {"command": command}, client_token=token
+        )
     except Exception as exc:
         console.print(f"[red]Error connecting to agent: {exc}[/red]")
         console.print("Is the agent running? Start it with: safeskill start")
@@ -200,9 +231,12 @@ def status(socket_path: str) -> None:
 @main.command()
 @click.option("--socket", "socket_path", default=DEFAULT_SOCKET, help="Unix socket path")
 def reload(socket_path: str) -> None:
-    """Reload policies and signatures."""
+    """Reload policies and signatures (requires admin token)."""
+    admin = _read_token("/etc/safeskill/admin.token")
     try:
-        result = _send_to_socket(socket_path, "POST", "/policy/reload")
+        result = _send_to_socket(
+            socket_path, "POST", "/policy/reload", admin_token=admin
+        )
         console.print(f"[green]Reloaded:[/green] {result}")
     except Exception as exc:
         console.print(f"[red]Error: {exc}[/red]")
@@ -213,9 +247,12 @@ def reload(socket_path: str) -> None:
 @click.option("--socket", "socket_path", default=DEFAULT_SOCKET, help="Unix socket path")
 @click.argument("mode", type=click.Choice(["normal", "strict", "zero-trust"]))
 def set_trust(socket_path: str, mode: str) -> None:
-    """Change trust mode at runtime."""
+    """Change trust mode at runtime (requires admin token, typically sudo)."""
+    admin = _read_token("/etc/safeskill/admin.token")
     try:
-        result = _send_to_socket(socket_path, "POST", "/trust-mode", {"trust_mode": mode})
+        result = _send_to_socket(
+            socket_path, "POST", "/trust-mode", {"trust_mode": mode}, admin_token=admin
+        )
         console.print(f"[green]Trust mode set to: {result.get('trust_mode')}[/green]")
     except Exception as exc:
         console.print(f"[red]Error: {exc}[/red]")
@@ -226,9 +263,12 @@ def set_trust(socket_path: str, mode: str) -> None:
 @click.option("--socket", "socket_path", default=DEFAULT_SOCKET, help="Unix socket path")
 @click.argument("env", type=click.Choice(["dev", "staging", "production"]))
 def set_env(socket_path: str, env: str) -> None:
-    """Change environment at runtime."""
+    """Change environment at runtime (requires admin token, typically sudo)."""
+    admin = _read_token("/etc/safeskill/admin.token")
     try:
-        result = _send_to_socket(socket_path, "POST", "/environment", {"environment": env})
+        result = _send_to_socket(
+            socket_path, "POST", "/environment", {"environment": env}, admin_token=admin
+        )
         console.print(f"[green]Environment set to: {result.get('environment')}[/green]")
     except Exception as exc:
         console.print(f"[red]Error: {exc}[/red]")

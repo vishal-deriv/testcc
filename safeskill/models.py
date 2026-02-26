@@ -93,10 +93,15 @@ class EvaluationResult(BaseModel):
 class AgentConfig(BaseModel):
     trust_mode: TrustMode = TrustMode.NORMAL
     environment: Environment = Environment.DEV
-    socket_path: str = "/tmp/safeskill.sock"
+    socket_path: str = "/var/run/safeskill/safeskill.sock"
+    client_token_path: str = "/var/run/safeskill/client.token"
+    admin_token_path: str = "/etc/safeskill/admin.token"
     http_port: int = 0
     log_dir: str = "/var/log/safeskill"
     config_dir: str = "/etc/safeskill"
+    default_hostname: str = ""
+    default_user: str = ""
+    default_source_ip: str = ""
     update_url: str = ""
     update_interval_seconds: int = 3600
     auto_update: bool = False
@@ -105,3 +110,6 @@ class AgentConfig(BaseModel):
     audit_log_enabled: bool = True
     hot_reload: bool = True
     signature_verify: bool = True
+    siem_endpoint_url: str = ""
+    siem_auth_header: str = ""
+    siem_auth_header_name: str = "Authorization"

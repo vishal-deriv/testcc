@@ -189,6 +189,12 @@ class TestDataExfiltration:
         )
         assert result.verdict == Verdict.BLOCKED
 
+    def test_block_cat_passwd_redirect(self, evaluator: CommandEvaluator):
+        result = evaluator.evaluate(
+            EvaluationRequest(command="cat /etc/passwd > /dev/null")
+        )
+        assert result.verdict == Verdict.BLOCKED
+
 
 class TestForkBombs:
     def test_block_fork_bomb(self, evaluator: CommandEvaluator):

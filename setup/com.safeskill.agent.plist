@@ -14,7 +14,7 @@
         <string>--log-dir</string>
         <string>/var/log/safeskill</string>
         <string>--socket</string>
-        <string>/tmp/safeskill.sock</string>
+        <string>/var/run/safeskill/safeskill.sock</string>
     </array>
 
     <key>RunAtLoad</key>
