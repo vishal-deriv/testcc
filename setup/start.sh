@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# SafeSkill start.sh
+# SafeSkill start.sh — Step 2 of 2
 #
 # Wires SafeSkill into OpenClaw via NODE_OPTIONS preload hook.
-# Run once after installing OpenClaw. Safe to re-run.
+# Run after: sudo bash setup/install.sh
 #
 # What this does:
 #   1. Copies safeskill-hook.js to ~/.openclaw/
@@ -28,7 +28,7 @@ die()  { echo -e "${RED}[ERR]${NC} $*" >&2; exit 1; }
 
 echo ""
 echo "======================================="
-echo "  SafeSkill — Wire Hook into OpenClaw"
+echo "  SafeSkill — Wire Hook into OpenClaw (Step 2 of 2)"
 echo "======================================="
 echo ""
 
@@ -38,7 +38,7 @@ step "1. Checking prerequisites..."
 [[ -f "$HOOK_SRC" ]]  || die "Hook not found at $HOOK_SRC"
 [[ -f "$PLIST" ]]     || die "OpenClaw plist not found at $PLIST"
 [[ -S "/var/run/safeskill/safeskill.sock" ]] || \
-    warn "SafeSkill daemon socket not found — start daemon first: sudo launchctl load -w /Library/LaunchDaemons/com.safeskill.agent.plist"
+    warn "SafeSkill daemon socket not found — run setup first: sudo bash setup/install.sh"
 
 ok "Prerequisites OK"
 
@@ -108,15 +108,8 @@ echo "  Hook:    $HOOK_DST"
 echo "  Method:  NODE_OPTIONS preload (child_process interception)"
 echo "  Layers:  1 (was 3 — bash wrapper/trap/shim removed)"
 echo ""
-echo "Monitor audit log (always uses most recent file):"
-echo "  sudo tail -f \$(sudo ls -t /var/log/safeskill/audit-*.jsonl | head -1) | python3 -c \\"
-echo "  \"import sys,json"
-echo "  for l in sys.stdin:"
-echo "    try:"
-echo "      d=json.loads(l)"
-echo "      if d.get('event_action')=='evaluate':"
-echo "        print(d['event_timestamp'][:19], f\\\"[{d['event_outcome'].upper():7}]\\\", d.get('system_command',''))"
-echo "    except: pass\""
+echo "Monitor audit log:"
+echo "  sudo bash setup/monitor-audit.sh"
 echo ""
 echo "Restart daemon if needed:"
 echo "  sudo launchctl kickstart -k system/com.safeskill.agent"
