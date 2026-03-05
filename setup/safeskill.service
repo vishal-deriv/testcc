@@ -1,0 +1,28 @@
+[Unit]
+Description=SafeSkill Command Security Agent
+Documentation=https://github.com/vishal-deriv/safeskill
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/safeskill-agent start \
+    --config-dir /etc/safeskill \
+    --log-dir /var/log/safeskill \
+    --socket /var/run/safeskill/safeskill.sock
+Restart=on-failure
+RestartSec=10
+
+Environment=SAFESKILL_TRUST_MODE=normal
+Environment=SAFESKILL_ENVIRONMENT=production
+
+WorkingDirectory=/etc/safeskill
+StandardOutput=append:/var/log/safeskill/agent-stdout.log
+StandardError=append:/var/log/safeskill/agent-stderr.log
+
+LimitNOFILE=1024
+
+RuntimeDirectory=safeskill
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target
