@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# SafeSkill install-linux.sh — Step 1 of 2 (Linux)
+# SafeSkill install.sh — Step 1 of 2 (Linux)
 #
 # Installs the SafeSkill daemon (venv, binary, config, systemd).
-# Run with sudo: sudo bash setup/install-linux.sh
+# Run with sudo: sudo bash setup/linux/install.sh
 #
-# After this, run: bash setup/start-linux.sh  (wires hook into OpenClaw)
+# After this, run: bash setup/linux/start.sh  (wires hook into OpenClaw)
 #
 # What this does:
 #   1. Creates Python venv at /opt/safeskill/venv
@@ -23,7 +23,7 @@ fi
 
 REAL_USER="${SUDO_USER:-${USER:-$(logname 2>/dev/null || echo '')}}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CONFIG_DIR="/etc/safeskill"
 LOG_DIR="/var/log/safeskill"
 RUN_DIR="/var/run/safeskill"
@@ -45,7 +45,7 @@ echo "  Platform: Linux (systemd)"
 echo "==========================================="
 echo ""
 
-# ── 0. Check prerequisites ─────────────────────────────────────────────────
+# -- 0. Check prerequisites -------------------------------------------------
 step "0. Checking prerequisites..."
 
 if ! command -v python3 &>/dev/null; then
@@ -92,7 +92,7 @@ fi
 
 ok "Prerequisites OK (Python $PY_VER)"
 
-# ── 1. Create venv and install package ─────────────────────────────────────
+# -- 1. Create venv and install package -------------------------------------
 step "1. Creating venv and installing SafeSkill..."
 
 mkdir -p /opt/safeskill
@@ -107,14 +107,14 @@ fi
 "$VENV_DIR/bin/pip" install -e "$PROJECT_DIR" -q
 ok "Package installed"
 
-# ── 2. Symlink binaries ───────────────────────────────────────────────────
+# -- 2. Symlink binaries ----------------------------------------------------
 step "2. Symlinking daemon and CLI binaries..."
 mkdir -p /usr/local/bin
 ln -sf "$VENV_DIR/bin/safeskill-agent" "$BIN_SYMLINK"
 ln -sf "$VENV_DIR/bin/safeskill" /usr/local/bin/safeskill
 ok "Symlinked $BIN_SYMLINK and /usr/local/bin/safeskill"
 
-# ── 3. Config directory ──────────────────────────────────────────────────
+# -- 3. Config directory ----------------------------------------------------
 step "3. Setting up /etc/safeskill config directory..."
 if [[ ! -d "$CONFIG_DIR" ]]; then
     mkdir -p "$CONFIG_DIR/environments"
@@ -158,7 +158,7 @@ chmod 640 "$CONFIG_DIR"/*.yaml 2>/dev/null || true
 [[ -f "$CONFIG_DIR/admin.token" ]] && chmod 600 "$CONFIG_DIR/admin.token"
 ok "Config directory ready"
 
-# ── 4. Audit log directory ───────────────────────────────────────────────
+# -- 4. Audit log directory -------------------------------------------------
 step "4. Setting up audit log directory..."
 
 LOG_GROUP="adm"
@@ -176,14 +176,14 @@ else
     ok "Created $LOG_DIR"
 fi
 
-# ── 5. Runtime directory ─────────────────────────────────────────────────
+# -- 5. Runtime directory ---------------------------------------------------
 step "5. Setting up runtime directory..."
 mkdir -p "$RUN_DIR"
 chown root:root "$RUN_DIR"
 chmod 755 "$RUN_DIR"
 ok "Runtime directory ready ($RUN_DIR)"
 
-# ── 6. systemd service ──────────────────────────────────────────────────
+# -- 6. systemd service -----------------------------------------------------
 step "6. Installing systemd service..."
 
 if pgrep -f "safeskill-agent start" &>/dev/null; then
@@ -206,6 +206,7 @@ Type=simple
 ExecStart=/usr/local/bin/safeskill-agent start --config-dir /etc/safeskill --log-dir /var/log/safeskill --socket /var/run/safeskill/safeskill.sock
 Restart=on-failure
 RestartSec=10
+TimeoutStopSec=20
 Environment=SAFESKILL_TRUST_MODE=normal
 Environment=SAFESKILL_ENVIRONMENT=production
 WorkingDirectory=/etc/safeskill
@@ -237,7 +238,7 @@ else
     warn "systemd not available — start daemon manually: /usr/local/bin/safeskill-agent start &"
 fi
 
-# ── 7. Verify socket ────────────────────────────────────────────────────
+# -- 7. Verify socket -------------------------------------------------------
 step "7. Verifying socket..."
 for i in 1 2 3 4 5; do
     if [[ -S /var/run/safeskill/safeskill.sock ]]; then
@@ -248,7 +249,7 @@ for i in 1 2 3 4 5; do
 done
 [[ -S /var/run/safeskill/safeskill.sock ]] || warn "Socket not yet available — daemon may still be starting"
 
-# ── 8. Smoke test ────────────────────────────────────────────────────────
+# -- 8. Smoke test ----------------------------------------------------------
 step "8. Running smoke test..."
 
 if [[ -S /var/run/safeskill/safeskill.sock ]]; then
@@ -277,6 +278,6 @@ echo "  Socket:    /var/run/safeskill/safeskill.sock"
 echo "  Service:   sudo systemctl status safeskill"
 echo ""
 echo "Next step — wire hook into OpenClaw:"
-echo "  bash setup/start-linux.sh"
+echo "  bash setup/linux/start.sh"
 echo "==========================================="
 echo ""

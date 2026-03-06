@@ -81,7 +81,8 @@ class SafeSkillServer:
         self._app.router.add_post("/environment", self._handle_set_environment)
         self._app.router.add_get("/audit/verify", self._handle_verify_audit)
 
-        self._runner = web.AppRunner(self._app)
+        # Bound graceful shutdown time so `systemctl restart` does not hang.
+        self._runner = web.AppRunner(self._app, shutdown_timeout=5.0)
         await self._runner.setup()
 
         # Create /var/run/safeskill (root-owned, 0755) — only daemon can create socket there

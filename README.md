@@ -54,12 +54,12 @@ bash setup/start.sh
 
 #### Linux
 ```bash
-sudo bash setup/install-linux.sh
-bash setup/start-linux.sh
+sudo bash setup/linux/install.sh
+bash setup/linux/start.sh
 ```
 
-- **install-linux.sh**: Creates venv, installs daemon, config, systemd service. Auto-installs python3/curl if missing (apt/dnf/yum). Requires sudo.
-- **start-linux.sh**: Copies hook to `~/.openclaw/`, injects NODE_OPTIONS via systemd override or openclaw.json, restarts OpenClaw.
+- **setup/linux/install.sh**: Creates venv, installs daemon, config, systemd service. Auto-installs python3/curl if missing (apt/dnf/yum). Requires sudo.
+- **setup/linux/start.sh**: Copies hook to `~/.openclaw/`, injects NODE_OPTIONS via systemd override or openclaw.json, restarts OpenClaw. Set `OPENCLAW_PROFILE=<name>` when not using `main`.
 
 #### Jamf MDM (fleet deployment)
 
@@ -78,7 +78,7 @@ sudo bash setup/monitor-audit.sh
 ### 5. Configure SIEM (optional)
 ```bash
 # Fix auth header from old ?key= query param to x-api-key header
-sudo bash setup/fix-siem-config.sh
+sudo bash setup/linux/fix-siem-config.sh
 
 # Verify
 sudo cat /etc/safeskill/agent.yaml | grep siem
@@ -188,12 +188,9 @@ sudo systemctl restart safeskill
 ```bash
 ls -la ~/.openclaw/safeskill-hook.js
 
-# Check NODE_OPTIONS is set:
-echo $NODE_OPTIONS
-# Should show: --require /home/<user>/.openclaw/safeskill-hook.js
-
-# Check openclaw.json:
-cat ~/.openclaw/openclaw.json | grep NODE_OPTIONS
+# Check service/drop-in or gateway launch command includes NODE_OPTIONS:
+systemctl --user cat openclaw-gateway 2>/dev/null || true
+systemctl --user cat openclaw-gateway-main 2>/dev/null || true
 
 safeskill check whoami
 ```
@@ -274,14 +271,16 @@ openclaw-skill/
 setup/
 ├── install.sh                     ← macOS: Step 1 — Install daemon (launchd)
 ├── start.sh                       ← macOS: Step 2 — Wire hook into OpenClaw
-├── install-linux.sh               ← Linux: Step 1 — Install daemon (systemd)
-├── start-linux.sh                 ← Linux: Step 2 — Wire hook into OpenClaw
+├── linux/
+│   ├── install.sh                 ← Linux: Step 1 — Install daemon (systemd)
+│   ├── start.sh                   ← Linux: Step 2 — Wire hook into OpenClaw
+│   ├── safeskill.service          ← Linux: systemd unit file
+│   ├── fix-siem-config.sh         ← Linux: SIEM auth/endpoint fixer
+│   └── monitor-audit.sh           ← Linux: monitor audit log
 ├── jamf-install.sh                ← Jamf MDM: All-in-one fleet deployment
-├── safeskill.service              ← Linux: systemd unit file
 ├── com.safeskill.agent.plist      ← macOS: launchd daemon config
 ├── com.safeskill.updater.plist    ← macOS: launchd updater config
 ├── monitor-audit.sh               ← Monitor audit log (both platforms)
-├── fix-siem-config.sh             ← Fix SIEM auth header
 ├── uninstall-safeskill.sh         ← Remove SafeSkill (sudo)
 ├── uninstall-openclaw.sh          ← Remove OpenClaw
 └── uninstall-all.sh               ← Remove both

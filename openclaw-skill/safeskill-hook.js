@@ -52,6 +52,7 @@ const HEALTH_PREFIXES = [
   'ps -p ',                       // gateway PID inspection
   'launchctl print gui/',         // launchd service status
   'arp -a -n -l',                 // network table check (~every 15s)
+  'ip neigh show',                // Linux neighbor table check (~every 15s)
   '/usr/sbin/scutil --get',       // system hostname lookups
   'defaults read -g ',            // system locale/preference reads
 ];

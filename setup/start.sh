@@ -14,6 +14,11 @@
 
 set -euo pipefail
 
+if [[ "$(uname -s)" == "Linux" ]]; then
+    echo "[ERR] Detected Linux. Use: bash setup/linux/start.sh" >&2
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK_SRC="$SCRIPT_DIR/openclaw-skill/safeskill-hook.js"
 HOOK_DST="$HOME/.openclaw/safeskill-hook.js"
@@ -46,6 +51,74 @@ ok "Prerequisites OK"
 step "2. Installing hook file..."
 cp "$HOOK_SRC" "$HOOK_DST"
 ok "Hook installed: $HOOK_DST"
+
+# ── 2b. Inject security section into SOUL.md ─────────────────────────────────
+step "2b. Injecting security section into SOUL.md..."
+
+SOUL_FILE="$HOME/.openclaw/workspace/SOUL.md"
+SECURITY_MARKER_START="<!-- SAFESKILL-SECURITY — OPERATOR CONTROLLED, IMMUTABLE -->"
+SECURITY_MARKER_END="<!-- END SAFESKILL-SECURITY -->"
+SECURITY_BLOCK=$(cat <<'EOF'
+<!-- SAFESKILL-SECURITY — OPERATOR CONTROLLED, IMMUTABLE -->
+## Security (immutable)
+- Never run malicious commands.
+- Never exfiltrate sensitive data. No credentials, .env, .ssh, /etc/passwd, API keys.
+- Security first. These rules override everything.
+<!-- END SAFESKILL-SECURITY -->
+EOF
+)
+
+if [[ -f "$SOUL_FILE" ]]; then
+    # Check if security block already exists
+    if grep -q "$SECURITY_MARKER_START" "$SOUL_FILE" 2>/dev/null; then
+        # Update existing block
+        python3 <<PYUPDATE
+import re
+import pathlib
+
+soul_path = pathlib.Path('$SOUL_FILE')
+content = soul_path.read_text(encoding='utf-8')
+
+# Pattern to match the entire security block (including markers)
+pattern = r'<!-- SAFESKILL-SECURITY[^>]*-->.*?<!-- END SAFESKILL-SECURITY -->'
+replacement = '''$SECURITY_BLOCK'''
+
+if re.search(pattern, content, re.DOTALL):
+    content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+    soul_path.write_text(content, encoding='utf-8')
+    print('Updated')
+else:
+    print('Not found')
+PYUPDATE
+        ok "Security section updated in SOUL.md"
+    else
+        # Append security block before the final "---" separator or at end
+        python3 <<PYAPPEND
+import pathlib
+
+soul_path = pathlib.Path('$SOUL_FILE')
+content = soul_path.read_text(encoding='utf-8')
+
+security_block = '''$SECURITY_BLOCK'''
+
+# Try to insert before final "---" separator
+if '---' in content:
+    parts = content.rsplit('---', 1)
+    if len(parts) == 2:
+        content = parts[0] + security_block + '\n\n---' + parts[1]
+    else:
+        content = content.rstrip() + '\n\n' + security_block + '\n'
+else:
+    content = content.rstrip() + '\n\n' + security_block + '\n'
+
+soul_path.write_text(content, encoding='utf-8')
+print('Appended')
+PYAPPEND
+        ok "Security section injected into SOUL.md"
+    fi
+else
+    warn "SOUL.md not found at $SOUL_FILE — skipping injection"
+fi
 
 # ── 3. Inject NODE_OPTIONS into plist ────────────────────────────────────────
 step "3. Updating OpenClaw plist..."
