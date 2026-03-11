@@ -11,6 +11,7 @@ ExecStart=/usr/local/bin/safeskill-agent start \
     --socket /var/run/safeskill/safeskill.sock
 Restart=on-failure
 RestartSec=10
+TimeoutStopSec=20
 
 Environment=SAFESKILL_TRUST_MODE=normal
 Environment=SAFESKILL_ENVIRONMENT=production

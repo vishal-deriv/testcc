@@ -1,41 +1,50 @@
-# SafeSkill + OpenClaw Integration
+# SafeSkill Integration for OpenClaw
 
-**Fast, minimal, zero-overhead AI command safety.**
-
-SafeSkill intercepts ALL commands that OpenClaw's AI agent tries to execute, evaluates them against security rules in real-time, and logs everything to audit trail + SIEM.
+SafeSkill provides fast, minimal, and zero-overhead AI command safety for OpenClaw. It intercepts all commands executed by the OpenClaw AI agent, evaluates them against real-time security rules, and logs activity to an audit trail and SIEM endpoint.
 
 ## Architecture
 
-```
-OpenClaw (Node.js process)
-  ↓
-NODE_OPTIONS preload hook (safeskill-hook.js)
-  ↓
-child_process interception (spawn, spawnSync, exec, execSync, execFile, execFileSync, fork)
-  ↓
-SafeSkill daemon evaluation (~25ms via unix socket + curl)
-  ↓
-Allow/Block + Audit Log + SIEM Forward
+```mermaid
+flowchart TD
+    %% Neutral styling
+    classDef default fill:#f9f9f9,stroke:#666,stroke-width:1px,color:#333;
+    classDef hook fill:#e8f0fe,stroke:#2b5797,stroke-width:1px;
+    classDef daemon fill:#f3f3f3,stroke:#555,stroke-width:1px;
+    classDef allow fill:#eef7ea,stroke:#388e3c,stroke-width:1px;
+    classDef block fill:#fdf0f0,stroke:#d32f2f,stroke-width:1px;
+
+    OpenClaw[OpenClaw Process] --> Hook[NODE_OPTIONS Hook<br/>safeskill-hook.js]:::hook
+    
+    subgraph Interception Layer
+        Hook -->|Health Checks| FastPath[Direct Execution]:::allow
+        Hook -->|Standard Commands| Eval[SafeSkill Daemon<br/>~25ms Latency]:::daemon
+    end
+    
+    Eval --> Decision{Security Policy}
+    Decision -->|Approved| Exec[Execute Child Process]:::allow
+    Decision -->|Rejected| Deny[Block Execution]:::block
+    
+    Exec --> Audit[Audit Trail & SIEM]
+    Deny --> Audit
 ```
 
 ## Key Features
 
-- **Single-layer**: Node.js preload hook (no shell wrappers, no bash traps, no binary shims)
-- **Fast**: ~25ms daemon round-trip via unix socket + curl (vs ~450ms Python CLI)
-- **Fail-closed**: Any error blocks the command automatically
-- **Cross-platform**: macOS (launchd) and Linux (systemd)
-- **Health-check optimized**: OpenClaw's internal monitoring commands bypass daemon entirely (zero latency)
-- **SIEM-ready**: All evaluations forwarded to security endpoint in real-time
-- **No OpenClaw modification**: Pure runtime monkey-patching via child_process interception
+- **Single-Layer Interception:** Utilizes a Node.js preload hook (`NODE_OPTIONS=--require`) for zero-overhead interception without shell wrappers.
+- **High Performance:** Averages ~25ms latency per evaluation via a local Unix socket and curl.
+- **Fail-Closed Security:** Any error in the evaluation pipeline automatically blocks command execution.
+- **Cross-Platform:** Native support for macOS (`launchd`) and Linux (`systemd`).
+- **SIEM Integration:** Real-time event forwarding to enterprise security endpoints.
+- **Zero Source Modification:** Operates via pure runtime monkey-patching of Node.js `child_process` methods, requiring no changes to the OpenClaw codebase.
 
-## End-to-End Setup
+## Installation & Setup
 
-### Prerequisites
+**Prerequisites:** 
 - Node.js 22+
 - Python 3.10+
-- macOS (launchd) or Linux (systemd)
 
 ### 1. Install OpenClaw
+
 ```bash
 npm install -g openclaw@latest
 openclaw onboard --install-daemon
@@ -43,251 +52,115 @@ openclaw onboard --install-daemon
 
 ### 2. Install SafeSkill
 
-#### macOS
+Select the installation method appropriate for your platform.
+
+#### macOS Deployment
+
+Installs the Python virtual environment, daemon, and wires the `NODE_OPTIONS` hook into OpenClaw via `launchd`.
+
 ```bash
 sudo bash setup/install.sh
 bash setup/start.sh
 ```
 
-- **install.sh**: Creates venv, installs daemon, config, launchd. Requires sudo.
-- **start.sh**: Copies hook to `~/.openclaw/`, injects NODE_OPTIONS into the gateway plist, restarts OpenClaw.
+#### Linux Deployment
 
-#### Linux
+Installs dependencies (python3/curl), configures the `systemd` service, and injects the hook into OpenClaw. 
+*Note: Set `OPENCLAW_PROFILE=<name>` before running if you are not using the default `main` profile.*
+
 ```bash
-sudo bash setup/install-linux.sh
-bash setup/start-linux.sh
+sudo bash setup/linux/install.sh
+bash setup/linux/start.sh
 ```
 
-- **install-linux.sh**: Creates venv, installs daemon, config, systemd service. Auto-installs python3/curl if missing (apt/dnf/yum). Requires sudo.
-- **start-linux.sh**: Copies hook to `~/.openclaw/`, injects NODE_OPTIONS via systemd override or openclaw.json, restarts OpenClaw.
+#### Enterprise Jamf MDM (macOS Fleet)
 
-#### Jamf MDM (fleet deployment)
+For fleet-wide deployments, upload `setup/jamf-install.sh` to Jamf Pro. This comprehensive script automatically handles Xcode Command Line Tools, Python installation, daemon setup, configuration, and hook deployment in a single pass.
 
-Upload `setup/jamf-install.sh` to Jamf Pro as a script. It handles everything in one pass — installs Xcode CLT, Python, daemon, config, hook, and smoke tests. See [Jamf MDM Deployment](#jamf-mdm-deployment) below.
+### 3. Verify & Monitor
 
-### 3. Run OpenClaw TUI
+Launch the OpenClaw terminal user interface:
+
 ```bash
 openclaw tui
 ```
 
-### 4. Monitor audit log (optional)
-```bash
-sudo bash setup/monitor-audit.sh
-```
-
-### 5. Configure SIEM (optional)
-```bash
-# Fix auth header from old ?key= query param to x-api-key header
-sudo bash setup/fix-siem-config.sh
-
-# Verify
-sudo cat /etc/safeskill/agent.yaml | grep siem
-```
-
-## How the Hook Works
-
-**File:** `openclaw-skill/safeskill-hook.js` (deployed to `~/.openclaw/safeskill-hook.js`)
-
-1. Loads before OpenClaw startup via `NODE_OPTIONS=--require`
-2. Saves original child_process methods before patching
-3. Replaces all 7 methods: spawn, spawnSync, exec, execSync, execFile, execFileSync, fork
-4. For each command:
-   - Check if it's a health-check (bypass daemon entirely for speed)
-   - Otherwise, POST to SafeSkill daemon socket via curl
-   - Daemon returns `{blocked: true/false}`
-   - Allow/block the child process accordingly
-5. Uses recursion guard to prevent curl itself from being intercepted
-
-## Security Model
-
-**Soft layer (OpenClaw agent reasoning):**
-- Agent has soul-injection that refuses dangerous commands at reasoning time
-- Never actually calls child_process for dangerous commands
-
-**Hard layer (SafeSkill hook):**
-- If agent tries anyway, hook blocks it
-- Audit log captures the attempt
-- SIEM endpoint notified in real-time
+**Monitor the Live Audit Log:**
+- **macOS:** `sudo bash setup/monitor-audit.sh`
+- **Linux:** `sudo bash setup/linux/monitor-audit.sh`
 
 ## Configuration
 
-### `/etc/safeskill/agent.yaml`
+### Core Settings (`/etc/safeskill/agent.yaml`)
+
+Define audit logging and SIEM forwarding rules in the primary configuration file.
 
 ```yaml
-# Audit log settings
 audit_log_enabled: true
 hot_reload: true
 
-# SIEM forwarding
-siem_endpoint_url: https://ngsoc-gateway-auth-8mlnuyg1.uc.gateway.dev/ingestor/openclaw
+siem_endpoint_url: https://<your-siem-endpoint>/ingestor/openclaw
 siem_auth_header_name: x-api-key
 siem_auth_header: <YOUR_API_KEY>
 ```
+*Note: Use the included helper script `sudo bash setup/linux/fix-siem-config.sh` to update legacy SIEM authentication methods.*
 
-### `~/.openclaw/openclaw.json`
+### OpenClaw Environment (`~/.openclaw/openclaw.json`)
+
+The setup scripts automatically inject the required socket variable.
 
 ```json
 {
   "env": {
     "SAFESKILL_SOCKET": "/var/run/safeskill/safeskill.sock"
-  },
-  "tools": {
-    "exec": {
-      "host": "gateway",
-      "security": "full",
-      "ask": "off"
-    }
   }
 }
 ```
 
 ## Troubleshooting
 
-### macOS
+### macOS Troubleshooting
 
-**Gateway not starting?**
-```bash
-ps aux | grep openclaw
-killall -9 openclaw-gateway
-openclaw gateway start
-```
+- **Check Hook Injection:** Verify that the launch agent contains the correct `NODE_OPTIONS`.
+  ```bash
+  /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:NODE_OPTIONS" ~/Library/LaunchAgents/ai.openclaw.gateway.plist
+  ```
+- **Daemon Status:** 
+  ```bash
+  launchctl list | grep safeskill
+  ```
+- **Restart Daemon:** 
+  ```bash
+  sudo launchctl kickstart -k system/com.safeskill.agent
+  ```
+- **Test Evaluation Engine:** 
+  ```bash
+  safeskill check whoami
+  ```
 
-**Hook not intercepting?**
-```bash
-ls -la ~/.openclaw/safeskill-hook.js
+### Linux Troubleshooting
 
-/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:NODE_OPTIONS" \
-  ~/Library/LaunchAgents/ai.openclaw.gateway.plist
+- **Check Hook Injection:** Verify the gateway service overrides.
+  ```bash
+  systemctl --user cat openclaw-gateway 2>/dev/null || true
+  ```
+- **Daemon Status:** 
+  ```bash
+  sudo systemctl status safeskill
+  ```
+- **Restart Daemon:** 
+  ```bash
+  sudo systemctl restart safeskill
+  ```
+- **Test Evaluation Engine:** 
+  ```bash
+  safeskill check whoami
+  ```
 
-launchctl list | grep safeskill
-```
+## Uninstallation
 
-**Commands all blocked?**
-```bash
-sudo launchctl kickstart -k system/com.safeskill.agent
-safeskill check whoami
-```
+To cleanly remove components from the system:
 
-### Linux
-
-**Daemon not running?**
-```bash
-sudo systemctl status safeskill
-sudo journalctl -u safeskill -n 30
-sudo systemctl restart safeskill
-```
-
-**Socket not available?**
-```bash
-ls -la /var/run/safeskill/safeskill.sock
-# If missing, restart daemon:
-sudo systemctl restart safeskill
-```
-
-**Hook not intercepting?**
-```bash
-ls -la ~/.openclaw/safeskill-hook.js
-
-# Check NODE_OPTIONS is set:
-echo $NODE_OPTIONS
-# Should show: --require /home/<user>/.openclaw/safeskill-hook.js
-
-# Check openclaw.json:
-cat ~/.openclaw/openclaw.json | grep NODE_OPTIONS
-
-safeskill check whoami
-```
-
-**Commands all blocked?**
-```bash
-# Daemon needs to be running
-sudo systemctl restart safeskill
-
-# Verify daemon responding
-safeskill check whoami
-```
-
-## Jamf MDM Deployment
-
-For fleet deployment via Jamf Pro, use `setup/jamf-install.sh`. It's a single self-contained script that:
-
-1. Installs Xcode Command Line Tools (silent, no GUI)
-2. Installs Python 3.12 from python.org (if system Python < 3.10)
-3. Clones repo, creates venv, installs package
-4. Sets up config, policies, signatures, admin token
-5. Installs and starts LaunchDaemon
-6. Deploys hook into OpenClaw
-7. Runs 8 smoke tests
-8. Writes receipt for Jamf Extension Attributes
-
-**Jamf script parameters:**
-
-| Parameter | Label | Default |
-|-----------|-------|---------|
-| `$4` | SIEM Endpoint URL | *(blank — skip)* |
-| `$5` | SIEM API Key | *(blank — skip)* |
-| `$6` | Trust Mode | `normal` |
-| `$7` | Environment | `production` |
-| `$8` | Git Branch/Tag | `main` |
-
-**Extension Attribute** (to verify deployment across fleet):
-```bash
-#!/bin/bash
-if [[ -f /opt/safeskill/.installed ]]; then
-    status=$(grep '^status=' /opt/safeskill/.installed | cut -d= -f2)
-    version=$(grep '^version=' /opt/safeskill/.installed | cut -d= -f2)
-    echo "<result>${status} (v${version})</result>"
-else
-    echo "<result>not installed</result>"
-fi
-```
-
-## Uninstall
-
-**Remove SafeSkill only:**
-```bash
-sudo bash setup/uninstall-safeskill.sh
-```
-
-**Remove OpenClaw only:**
-```bash
-bash setup/uninstall-openclaw.sh
-```
-
-**Remove both:**
-```bash
-bash setup/uninstall-all.sh
-```
-
-| Script | What it removes |
-|--------|-----------------|
-| `uninstall-safeskill.sh` | Daemon, plists/service, binaries, /opt/safeskill, /etc/safeskill, /var/log/safeskill, /var/run/safeskill |
-| `uninstall-openclaw.sh` | Gateway process, ~/.openclaw, LaunchAgent plist, `npm uninstall -g openclaw`, shell completions |
-| `uninstall-all.sh` | Runs both scripts |
-
-## Files
-
-```
-openclaw-skill/
-└── safeskill-hook.js              ← Core deliverable (deployed to ~/.openclaw/)
-
-setup/
-├── install.sh                     ← macOS: Step 1 — Install daemon (launchd)
-├── start.sh                       ← macOS: Step 2 — Wire hook into OpenClaw
-├── install-linux.sh               ← Linux: Step 1 — Install daemon (systemd)
-├── start-linux.sh                 ← Linux: Step 2 — Wire hook into OpenClaw
-├── jamf-install.sh                ← Jamf MDM: All-in-one fleet deployment
-├── safeskill.service              ← Linux: systemd unit file
-├── com.safeskill.agent.plist      ← macOS: launchd daemon config
-├── com.safeskill.updater.plist    ← macOS: launchd updater config
-├── monitor-audit.sh               ← Monitor audit log (both platforms)
-├── fix-siem-config.sh             ← Fix SIEM auth header
-├── uninstall-safeskill.sh         ← Remove SafeSkill (sudo)
-├── uninstall-openclaw.sh          ← Remove OpenClaw
-└── uninstall-all.sh               ← Remove both
-```
-
-## Version History
-
-- **v2 (Current)**: NODE_OPTIONS preload hook, single-layer, ~25ms
-- **v1 (Deprecated)**: 3-layer bash (wrapper/trap/shim), ~600ms, removed
+- **Remove SafeSkill only:** `sudo bash setup/uninstall-safeskill.sh`
+- **Remove OpenClaw only:** `bash setup/uninstall-openclaw.sh`
+- **Remove Everything:** `bash setup/uninstall-all.sh`
